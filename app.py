@@ -124,7 +124,7 @@ def synthesize_with_google_tts(text: str) -> str:
     # פורמט אודיו WAV (LINEAR16)
     audio_config = texttospeech.AudioConfig(
         audio_encoding=texttospeech.AudioEncoding.LINEAR16,
-        sample_rate_hertz=16000 # קצב דגימה סטנדרטי למערכות טלפוניות
+        sample_rate_hertz=16000, 
         speaking_rate=1.2
     )
     
