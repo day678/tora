@@ -26,7 +26,8 @@ GOOGLE_CREDENTIALS_B64 = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_B64")
 # הגדרת נתיב העלאת הקובץ ונקודת מעבר לאחר ההשמעה
 YEMOT_UPLOAD_FOLDER = "ivr2:/85" # לדוגמה: מעלה לתיקייה 85 בראשי (ivr2)
 YEMOT_FILE_NAME = "dvartorah.wav"
-POST_PLAYBACK_GOTO = "/000" # לאן לחזור אחרי שהשלוחה מסיימת
+# לאן לעבור אחרי ההשמעה? (חזרה לתפריט הראשי '/')
+POST_PLAYBACK_GOTO = "/000" 
 
 # יצירת קובץ JSON זמני עם המפתח של Google Cloud
 if GOOGLE_CREDENTIALS_B64:
@@ -76,8 +77,8 @@ def summarize_dvartorah_with_gemini(text_to_summarize: str) -> str:
         "אתה עורך תורני ומנסח דברי תורה. נסח מחדש את הטקסט המועתק ל'דבר תורה' קצר, ברור ומכובד. "
         "אין להשתמש בסימני * או אימוג'ים וכדומה. "
         "בתחילת הסיכום יהיה טקסט: אני מסכם את מה שאמרת. ואז תסכם את מה שנכתב בתמלול בקצרה. אין להוסיף שום דבר משלך. "
-        "אם הטקסט אינו דבר תורה - תאמר שאינך יכול לענות על שום שאלה או לדבר על נושאים אחרים, אתה יכול רק לסכם את דברי התורה הנאמרים."
         "הפלט צריך להיות רק הכותרת והטקסט."
+        "אם הטקסט אינו דבר תורה - תאמר שאינך יכול לענות על שום שאלה או לדבר על נושאים אחרים, אתה יכול רק לסכם את דברי התורה הנאמרים."
     )
 
     payload = {
@@ -109,7 +110,6 @@ def summarize_dvartorah_with_gemini(text_to_summarize: str) -> str:
 def synthesize_with_google_tts(text: str) -> str:
     """ממיר טקסט לקובץ שמע WAV (LINEAR16) בעזרת Google Cloud TTS."""
     if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
-        # נחזיר כאן שגיאה שתוביל ל-Exception, כך שנוכל לטפל ב-Fallback
         raise EnvironmentError("Google Cloud credentials not configured for TTS.")
 
     client = texttospeech.TextToSpeechClient()
@@ -121,11 +121,11 @@ def synthesize_with_google_tts(text: str) -> str:
         name="he-IL-Wavenet-B"  # קול גברי טבעי בעברית
     )
 
-    # פורמט אודיו WAV (LINEAR16) עם קצב דיבור מואץ
+    # פורמט אודיו WAV (LINEAR16)
     audio_config = texttospeech.AudioConfig(
         audio_encoding=texttospeech.AudioEncoding.LINEAR16,
         sample_rate_hertz=16000, 
-        speaking_rate=1.2 # האצת הדיבור
+        speaking_rate=1.2
     )
     
     response = client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
@@ -141,10 +141,7 @@ def upload_to_yemot(audio_path: str, yemot_full_path: str):
     system_token = "0733181406:80809090"
     url = "https://www.call2all.co.il/ym/api/UploadFile"
 
-    # YEMOT_UPLOAD_FOLDER הוא 'ivr2:/85'. יש צורך להסיר את ivr2: מה-path_no_file
-    # ולשים לב שה-API של ימות המשיח מחייב את הנתיב בלי ivr2: בהעלאה
-    path_no_file = yemot_full_path.replace('ivr2:', '')
-    path_no_file = os.path.dirname(path_no_file).strip('/')
+    path_no_file = os.path.dirname(yemot_full_path)
     file_name = os.path.basename(yemot_full_path)
 
     with open(audio_path, "rb") as f:
@@ -152,8 +149,8 @@ def upload_to_yemot(audio_path: str, yemot_full_path: str):
         params = {
             "token": system_token,
             "path": path_no_file,
-            "file_name": file_name,
-            "convertAudio": 1 
+            "file_name": file_name, # הגדרת שם הקובץ במפורש
+            "convertAudio": 1 # ממליץ להשאיר כדי שימות יוודא פורמט תקין
         }
         response = requests.post(url, params=params, files=files)
         data = response.json()
@@ -181,7 +178,6 @@ def upload_audio():
         if stockname:
             file_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={system_token}&path=ivr2:/{stockname}"
         else:
-            # אם אין קובץ להורדה, מחזירים שגיאה שתוקרא למאזין
             return Response("שגיאה: חסר קובץ להורדה.", mimetype="text/plain")
 
     if not file_url.startswith("http"):
@@ -207,7 +203,6 @@ def upload_audio():
             final_dvartorah = summarize_dvartorah_with_gemini(recognized_text)
 
             # 2. הפקת אודיו עם Google Cloud TTS
-            # אם ה-TTS נכשל כאן, ה-Exception ייתפס למטה
             tts_path = synthesize_with_google_tts(final_dvartorah)
 
             # 3. העלאה לימות המשיח
@@ -218,10 +213,29 @@ def upload_audio():
             os.remove(tts_path)
 
             if upload_success:
-                # 5. החזרת "OK" בלבד - זהו השינוי הקריטי!
-                # המערכת בימות המשיח תפרש את זה כ"תשובה פשוטה" ותפעיל את api_answer_OK.
-                logging.info("Returning IVR response: OK")
-                return Response("OK", status=200, mimetype='text/plain')
+                # 5. החזרת פקודת השמעה ל-IVR (הפקודה חייבת להיות בטקסט פשוט)
+                # go_to_folder_and_play=שלוחה,קובץ,0.
+                # אנחנו משתמשים בנתיב היחסי של הקובץ (שלוחה 85), ומורים למערכת לעבור אח"כ ל-POST_PLAYBACK_GOTO
+                
+                # הפקודה המלאה תהיה: go_to_folder_and_play=/85,dvartorah.wav,0.
+                # הערה: מכיוון שימות דורש go_to_folder_and_play=שלוחה,קובץ...
+                # והשלוחה לאן לעבור אחרי ההשמעה מוגדרת ב-api_end_goto
+                # אנחנו מחזירים רק את הפעולה הראשית go_to_folder_and_play
+                
+                # אם נרצה לעבור לשלוחה POST_PLAYBACK_GOTO לאחר ההשמעה, נשתמש בשרשור פעולות (אפשרות ב'):
+                # אפשרות א': go_to_folder_and_play=/85,dvartorah.wav,0
+                # אפשרות ב' (מומלץ): go_to_folder_and_play=/85,dvartorah.wav,0.go_to_folder=/ (במקרה של תשובת שרת שמכילה הגדרות)
+                
+                # מכיוון שהקוד שלנו מחזיר פקודה אחת, הפקודה go_to_folder_and_play תשמיע ותחזור ל-api_end_goto המוגדר.
+                
+                # אנחנו משתמשים בנתיב המלא של הקובץ כפי שהועלה: 85/dvartorah.wav
+                # כדי להבטיח שהשלוחה תמצא את הקובץ בלי קשר לשלוחה שבה היא נמצאת
+                
+                # הפקודה הבאה תורה ל-IVR להשמיע את הקובץ הספציפי שהועלה
+                playback_command = f"go_to_folder_and_play={YEMOT_UPLOAD_FOLDER.replace('ivr2:', '')},{YEMOT_FILE_NAME},0"
+                
+                logging.info(f"Returning IVR command: {playback_command}")
+                return Response(playback_command, status=200, mimetype='text/plain')
 
             else:
                 logging.error("Final upload failed. Returning error to IVR.")
@@ -229,7 +243,6 @@ def upload_audio():
 
     except Exception as e:
         logging.error(f"Critical error: {e}")
-        # במקרה של כשל קריטי, מחזירים הודעת שגיאה להקראה
         return Response(f"שגיאה קריטית בעיבוד: {e}", status=200, mimetype='text/plain')
 
 # ------------------ Run ------------------
