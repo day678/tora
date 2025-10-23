@@ -75,9 +75,10 @@ def summarize_dvartorah_with_gemini(text_to_summarize: str) -> str:
     # הנחיה המדגישה פיסוק מלא לשיפור איכות ה-TTS
     prompt = (
         "אתה עורך תורני ומנסח דברי תורה. נסח מחדש את הטקסט המועתק ל'דבר תורה' קצר, ברור ומכובד. "
-        "הקפד להשתמש בסימני פיסוק מלאים (פסיקים, נקודות, וכו') כדי להבטיח קריאה ברורה וטבעית. "
-        "הוסף כותרת יפה בתחילת הסיכום, וסכם לשתי פסקאות קצרות בלבד. "
+        "אין להשתמש בסימני * או אימוג'ים וכדומה. "
+        "בתחילת הסיכום יהיה טקסט: אני מסכם את מה שאמרת. ואז תסכם את מה שנכתב בתמלול בקצרה. אין להוסיף שום דבר משלך. "
         "הפלט צריך להיות רק הכותרת והטקסט."
+        "אם הטקסט אינו דבר תורה - תאמר שאינך יכול לענות על שום שאלה או לדבר על נושאים אחרים, אתה יכול רק לסכם את דברי התורה הנאמרים."
     )
 
     payload = {
@@ -117,13 +118,14 @@ def synthesize_with_google_tts(text: str) -> str:
     # שימוש בקול Wavenet איכותי בעברית
     voice = texttospeech.VoiceSelectionParams(
         language_code="he-IL",
-        name="he-IL-Wavenet-D"  # קול גברי טבעי בעברית
+        name="he-IL-Wavenet-B"  # קול גברי טבעי בעברית
     )
 
     # פורמט אודיו WAV (LINEAR16)
     audio_config = texttospeech.AudioConfig(
         audio_encoding=texttospeech.AudioEncoding.LINEAR16,
         sample_rate_hertz=16000 # קצב דגימה סטנדרטי למערכות טלפוניות
+        speaking_rate=1.2
     )
     
     response = client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
