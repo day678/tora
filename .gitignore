@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+
+# Environment
+.env
+*.env
+
+# Google Cloud credentials
+google-key.json
+
+# OS files
+.DS_Store
+
+# Logs
+*.log
