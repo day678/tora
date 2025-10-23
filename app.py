@@ -26,8 +26,6 @@ GOOGLE_CREDENTIALS_B64 = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_B64")
 # הגדרת נתיב העלאת הקובץ ונקודת מעבר לאחר ההשמעה
 YEMOT_UPLOAD_FOLDER = "ivr2:/85" # לדוגמה: מעלה לתיקייה 85 בראשי (ivr2)
 YEMOT_FILE_NAME = "dvartorah.wav"
-# לאן לעבור אחרי ההשמעה? (חזרה לתפריט הראשי '/')
-POST_PLAYBACK_GOTO = "/85" 
 
 # יצירת קובץ JSON זמני עם המפתח של Google Cloud
 if GOOGLE_CREDENTIALS_B64:
