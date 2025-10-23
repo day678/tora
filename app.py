@@ -75,7 +75,7 @@ def summarize_dvartorah_with_gemini(text_to_summarize: str) -> str:
         "אתה עורך תורני ומנסח דברי תורה. נסח מחדש את הטקסט המועתק ל'דבר תורה' קצר, ברור ומכובד. "
         "אין להשתמש בסימני * או אימוג'ים וכדומה. "
         "בתחילת הסיכום תגיד בקצרה (בנוסח שלך) משהו כמו שהדברים שנאמרו נפלאים ואתה מסכם אותם. ואז תסכם את מה שנכתב בתמלול בקצרה. אין להוסיף שום דבר משלך. "
-        "אם הטקסט אינו דבר תורה - אל תסכם אותו כלל. רק תאמר שאינך יכול לענות על שום שאלה או לדבר על נושאים אחרים, אתה יכול רק לסכם את דברי התורה הנאמרים."
+        "אם הטקסט אינו דבר תורה - אל תסכם אותו כלל. רק תאמר (בניסוח משלך) שאתה לא יכול לענות על שום שאלה או לדבר על נושאים אחרים, אתה יכול רק לסכם את דברי התורה הנאמרים."
         "הפלט צריך להיות רק הכותרת והטקסט."
     )
 
@@ -139,17 +139,23 @@ def upload_to_yemot(audio_path: str, yemot_full_path: str):
     system_token = "0733181406:80809090"
     url = "https://www.call2all.co.il/ym/api/UploadFile"
 
-    # מנקים את ivr2: מהנתיב לפני שליחה ל-API
-    path_no_file = yemot_full_path.replace('ivr2:', '')
-    # משיגים את שם התיקייה בלבד (לדוגמה: /85)
-    path_no_file = os.path.dirname(path_no_file).strip('/')
+    # --- התיקון הקריטי בנתיב ---
+    # 1. מנקים את קידומת ה-ivr2: (מקבלים /85/dvartorah.wav)
+    path_with_file_name = yemot_full_path.replace('ivr2:', '') 
+    
+    # 2. מחלצים את נתיב התיקייה בלבד (לדוגמה: /85)
+    # נתיב זה נשלח לפרמטר 'path' ב-API של ימות המשיח.
+    path_only = os.path.dirname(path_with_file_name) 
+    
+    # 3. שם הקובץ
     file_name = os.path.basename(yemot_full_path)
+    # --------------------------
 
     with open(audio_path, "rb") as f:
         files = {"file": (file_name, f, 'audio/wav')}
         params = {
             "token": system_token,
-            "path": path_no_file,
+            "path": path_only,  # ה-path המתוקן: רק התיקייה (/85)
             "file_name": file_name,
             "convertAudio": 1 
         }
@@ -214,8 +220,7 @@ def upload_audio():
             os.remove(tts_path)
 
             if upload_success:
-                # 5. החזרת "OK" בלבד - זהו השינוי שביקשת!
-                # המערכת בימות המשיח תפרש את זה כ"תשובה פשוטה" ותפעיל את api_answer_OK.
+                # 5. החזרת "OK" בלבד - הפקודה הקריטית!
                 logging.info("Returning IVR response: OK")
                 return Response("OK", status=200, mimetype='text/plain')
 
