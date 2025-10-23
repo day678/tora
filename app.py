@@ -4,6 +4,7 @@ import logging
 import requests
 import json
 import time
+import base64
 from flask import Flask, request, Response
 from pydub import AudioSegment
 import speech_recognition as sr
@@ -18,10 +19,21 @@ logging.basicConfig(
 
 app = Flask(__name__)
 
+# ------------------ Decode Google credentials if provided as base64 ------------------
+if os.getenv("GOOGLE_APPLICATION_CREDENTIALS_B64"):
+    try:
+        decoded = base64.b64decode(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_B64")).decode("utf-8")
+        temp_path = "/tmp/google-key.json"
+        with open(temp_path, "w") as f:
+            f.write(decoded)
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_path
+        logging.info("✅ Google credentials loaded from base64 environment variable.")
+    except Exception as e:
+        logging.error(f"❌ Failed to load GOOGLE_APPLICATION_CREDENTIALS_B64: {e}")
+
 # ------------------ Configuration ------------------
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-YEMOT_TOKEN = os.getenv("YEMOT_TOKEN")  # לדוגמה: 0733181406:80809090
-GOOGLE_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")  # קובץ המפתח של גוגל
+YEMOT_TOKEN = os.getenv("YEMOT_TOKEN")
 
 # ------------------ Helper Functions ------------------
 
@@ -124,7 +136,7 @@ def upload_to_yemot(file_path: str, ivr_path: str) -> bool:
         data = {'token': YEMOT_TOKEN, 'path': f"ivr2:{ivr_path}", 'convertAudio': 1}
         r = requests.post(url, files=files, data=data, timeout=30)
         logging.info(f"Upload response: {r.text}")
-        return '"success":true' in r.text.lower()
+        return '"responseStatus":"OK"' in r.text or '"success":true' in r.text.lower()
     except Exception as e:
         logging.error(f"Yemot upload error: {e}")
         return False
