@@ -75,8 +75,8 @@ def summarize_dvartorah_with_gemini(text_to_summarize: str) -> str:
         "אתה עורך תורני ומנסח דברי תורה. נסח מחדש את הטקסט המועתק ל'דבר תורה' קצר, ברור ומכובד. "
         "אין להשתמש בסימני * או אימוג'ים וכדומה. "
         "בתחילת הסיכום תגיד בקצרה (בנוסח שלך) משהו כמו שהדברים שנאמרו נפלאים ואתה מסכם אותם. ואז תסכם את מה שנכתב בתמלול בקצרה. אין להוסיף שום דבר משלך. "
+        "אם הטקסט אינו דבר תורה - אל תסכם אותו כלל. רק תאמר שאינך יכול לענות על שום שאלה או לדבר על נושאים אחרים, אתה יכול רק לסכם את דברי התורה הנאמרים."
         "הפלט צריך להיות רק הכותרת והטקסט."
-        "אם הטקסט אינו דבר תורה - אל תסכם אותו כלל. רק תאמר שאינך יכול לענות על שום שאלה או לדבר על נושאים אחרים, אלא יכול רק לסכם את דברי התורה הנאמרים."
     )
 
     payload = {
@@ -123,7 +123,7 @@ def synthesize_with_google_tts(text: str) -> str:
     audio_config = texttospeech.AudioConfig(
         audio_encoding=texttospeech.AudioEncoding.LINEAR16,
         sample_rate_hertz=16000, 
-        speaking_rate=1.2
+        speaking_rate=1.2 # האצת הדיבור
     )
     
     response = client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
@@ -139,7 +139,10 @@ def upload_to_yemot(audio_path: str, yemot_full_path: str):
     system_token = "0733181406:80809090"
     url = "https://www.call2all.co.il/ym/api/UploadFile"
 
-    path_no_file = os.path.dirname(yemot_full_path)
+    # מנקים את ivr2: מהנתיב לפני שליחה ל-API
+    path_no_file = yemot_full_path.replace('ivr2:', '')
+    # משיגים את שם התיקייה בלבד (לדוגמה: /85)
+    path_no_file = os.path.dirname(path_no_file).strip('/')
     file_name = os.path.basename(yemot_full_path)
 
     with open(audio_path, "rb") as f:
@@ -147,8 +150,8 @@ def upload_to_yemot(audio_path: str, yemot_full_path: str):
         params = {
             "token": system_token,
             "path": path_no_file,
-            "file_name": file_name, # הגדרת שם הקובץ במפורש
-            "convertAudio": 1 # ממליץ להשאיר כדי שימות יוודא פורמט תקין
+            "file_name": file_name,
+            "convertAudio": 1 
         }
         response = requests.post(url, params=params, files=files)
         data = response.json()
@@ -211,29 +214,10 @@ def upload_audio():
             os.remove(tts_path)
 
             if upload_success:
-                # 5. החזרת פקודת השמעה ל-IVR (הפקודה חייבת להיות בטקסט פשוט)
-                # go_to_folder_and_play=שלוחה,קובץ,0.
-                # אנחנו משתמשים בנתיב היחסי של הקובץ (שלוחה 85), ומורים למערכת לעבור אח"כ ל-POST_PLAYBACK_GOTO
-                
-                # הפקודה המלאה תהיה: go_to_folder_and_play=/85,dvartorah.wav,0.
-                # הערה: מכיוון שימות דורש go_to_folder_and_play=שלוחה,קובץ...
-                # והשלוחה לאן לעבור אחרי ההשמעה מוגדרת ב-api_end_goto
-                # אנחנו מחזירים רק את הפעולה הראשית go_to_folder_and_play
-                
-                # אם נרצה לעבור לשלוחה POST_PLAYBACK_GOTO לאחר ההשמעה, נשתמש בשרשור פעולות (אפשרות ב'):
-                # אפשרות א': go_to_folder_and_play=/85,dvartorah.wav,0
-                # אפשרות ב' (מומלץ): go_to_folder_and_play=/85,dvartorah.wav,0.go_to_folder=/ (במקרה של תשובת שרת שמכילה הגדרות)
-                
-                # מכיוון שהקוד שלנו מחזיר פקודה אחת, הפקודה go_to_folder_and_play תשמיע ותחזור ל-api_end_goto המוגדר.
-                
-                # אנחנו משתמשים בנתיב המלא של הקובץ כפי שהועלה: 85/dvartorah.wav
-                # כדי להבטיח שהשלוחה תמצא את הקובץ בלי קשר לשלוחה שבה היא נמצאת
-                
-                # הפקודה הבאה תורה ל-IVR להשמיע את הקובץ הספציפי שהועלה
-                playback_command = f"go_to_folder_and_play={YEMOT_UPLOAD_FOLDER.replace('ivr2:', '')},{YEMOT_FILE_NAME},0"
-                
-                logging.info(f"Returning IVR command: {playback_command}")
-                return Response(playback_command, status=200, mimetype='text/plain')
+                # 5. החזרת "OK" בלבד - זהו השינוי שביקשת!
+                # המערכת בימות המשיח תפרש את זה כ"תשובה פשוטה" ותפעיל את api_answer_OK.
+                logging.info("Returning IVR response: OK")
+                return Response("OK", status=200, mimetype='text/plain')
 
             else:
                 logging.error("Final upload failed. Returning error to IVR.")
@@ -241,6 +225,7 @@ def upload_audio():
 
     except Exception as e:
         logging.error(f"Critical error: {e}")
+        # במקרה של כשל קריטי, מחזירים הודעת שגיאה להקראה
         return Response(f"שגיאה קריטית בעיבוד: {e}", status=200, mimetype='text/plain')
 
 # ------------------ Run ------------------
