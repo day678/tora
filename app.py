@@ -1,4 +1,5 @@
 import os
+import re
 import tempfile
 import base64
 import json
@@ -22,9 +23,9 @@ app = Flask(__name__)
 # ------------------ Configuration ------------------
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_CREDENTIALS_B64 = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_B64")
-
 SYSTEM_TOKEN = "0733181406:80809090"
-BASE_YEMOT_FOLDER = "ivr2:/85"  # שלוחה ראשית לכל הקבצים
+BASE_YEMOT_FOLDER = "ivr2:/85"
+GEMINI_INSTRUCTIONS_FILE = "gemini_instructions.txt"  # קובץ הנחיות חיצוני
 
 # יצירת קובץ זמני למפתח של Google Cloud
 if GOOGLE_CREDENTIALS_B64:
@@ -39,14 +40,29 @@ else:
 
 # ------------------ Helper Functions ------------------
 
+def load_gemini_instructions():
+    """קורא את הנחיות ג'מיני מקובץ חיצוני."""
+    try:
+        with open(GEMINI_INSTRUCTIONS_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to load Gemini instructions: {e}")
+        return "נסח את דבר התורה בצורה תורנית ויפה, בעברית תקינה וללא סמלים מיותרים."
+
+def clean_text_for_tts(text: str) -> str:
+    """מסיר אימוג'ים, סימנים מיוחדים ואותיות לועזיות כדי להבטיח הקראה נקייה."""
+    text = re.sub(r"[A-Za-z]", "", text)  # הסרת אותיות אנגליות
+    text = re.sub(r"[\*\@\#\$\%\^\&\(\)\_\+\=\[\]\{\}\|\\\/\<\>\~\`\:\;\"\'\—\–]", "", text)
+    text = re.sub(r"[\U00010000-\U0010ffff]", "", text)  # הסרת אימוג'ים
+    text = re.sub(r"\s+", " ", text).strip()  # ניקוי רווחים כפולים
+    return text
+
 def add_silence(input_path: str) -> AudioSegment:
-    """מוסיף שניית שקט לפני ואחרי קטע האודיו כדי לשפר את הדיוק בזיהוי דיבור."""
     audio = AudioSegment.from_file(input_path, format="wav")
     silence = AudioSegment.silent(duration=1000)
     return silence + audio + silence
 
 def recognize_speech(audio_segment: AudioSegment) -> str:
-    """ממיר אודיו לטקסט בעברית בעזרת Google Speech Recognition."""
     recognizer = sr.Recognizer()
     try:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_wav:
@@ -63,13 +79,13 @@ def recognize_speech(audio_segment: AudioSegment) -> str:
         return ""
 
 def summarize_dvartorah_with_gemini(text_to_summarize: str, phone_number: str) -> str:
-    """מסכם דבר תורה עם זיכרון עד 20 הודעות אחרונות לפי מספר הטלפון של המאזין."""
+    """מסכם דבר תורה עם הקשר, לפי מספר טלפון."""
     if not text_to_summarize or not GEMINI_API_KEY:
-        logging.warning("Skipping Gemini summarization: Missing text or API key.")
         return "שגיאה: לא ניתן לנסח דבר תורה."
 
     os.makedirs("/tmp/conversations", exist_ok=True)
     history_path = f"/tmp/conversations/{phone_number}.json"
+    instructions = load_gemini_instructions()
 
     history = {"messages": [], "last_updated": time.time()}
     if os.path.exists(history_path):
@@ -79,30 +95,16 @@ def summarize_dvartorah_with_gemini(text_to_summarize: str, phone_number: str) -
         except Exception:
             pass
 
-    # ניקוי היסטוריה ישנה (מעל 24 שעות)
+    # מחיקה אם עברו יותר מ-48 שעות
     if time.time() - history.get("last_updated", 0) > 48 * 3600:
         history = {"messages": [], "last_updated": time.time()}
 
-    # הוספת ההודעה החדשה
     history["messages"].append(text_to_summarize)
+    history["messages"] = history["messages"][-20:]
     history["last_updated"] = time.time()
 
-    # שמירה של עד 20 הודעות אחרונות בלבד
-    history["messages"] = history["messages"][-20:]
-
-    # בניית prompt חכם
     context_text = "\n---\n".join(history["messages"])
-    prompt = (
-        "אתה עורך תורני שמסכם דברי תורה שנאמרו בהמשכים על ידי אותו אדם. "
-        "לפניך רשימה של עד 20 קטעים שנאמרו בעבר. "
-        "אם ההודעה החדשה ממשיכה את אותו נושא – שלב אותה יחד עם הקודמות בסיכום אחד זורם. "
-        "אם נראה שהיא נושא חדש לגמרי – התחל דבר תורה חדש נפרד, בלי קשר לטקסטים הישנים. "
-        "נסח מחדש את הטקסט המועתק ל'דבר תורה' קצר, ברור ומכובד. "
-        "אין להשתמש כלל בסימני * או אימוג'ים וכדומה, בפלט לא יהיה שום כוכביות! אל תשלב בכותרת שלך כוכבית או אותיות באנגלית!. "
-        "בתחילת הסיכום תגיד בנוסח שלך משהו כמו שהדברים שנאמרו נפלאים ואתה מסכם אותם, ואז תסכם בקצרה. "
-        "אם זה לא דבר תורה, אמור רק שאתה לא יכול לסכם נושאים שאינם דברי תורה."
-        f"דברי תורה שנאמרו עד כה:\n{context_text}"
-    )
+    prompt = f"{instructions}\n\nדברי תורה שנאמרו עד כה:\n{context_text}"
 
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -116,24 +118,23 @@ def summarize_dvartorah_with_gemini(text_to_summarize: str, phone_number: str) -
         response.raise_for_status()
         data = response.json()
         result = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
-
         if result:
             with open(history_path, "w", encoding="utf-8") as f:
                 json.dump(history, f, ensure_ascii=False, indent=2)
             return result
-        else:
-            return text_to_summarize
+        return text_to_summarize
     except Exception as e:
         logging.error(f"Gemini API error: {e}")
         return text_to_summarize
 
 def synthesize_with_google_tts(text: str) -> str:
-    """ממיר טקסט לאודיו (WAV) בעזרת Google Cloud Text-to-Speech."""
-    if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
-        raise EnvironmentError("Google Cloud credentials not configured for TTS.")
+    """ממיר טקסט לאודיו (WAV) בעזרת Google Cloud TTS."""
+    clean_text = clean_text_for_tts(text)
+    if not clean_text:
+        clean_text = "לא ניתן להמיר טקסט זה להקראה."
 
     client = texttospeech.TextToSpeechClient()
-    synthesis_input = texttospeech.SynthesisInput(text=text)
+    synthesis_input = texttospeech.SynthesisInput(text=clean_text)
     voice = texttospeech.VoiceSelectionParams(
         language_code="he-IL",
         name="he-IL-Wavenet-B"
@@ -142,15 +143,11 @@ def synthesize_with_google_tts(text: str) -> str:
         audio_encoding=texttospeech.AudioEncoding.LINEAR16,
         sample_rate_hertz=16000,
         speaking_rate=1.15,
-        pitch=2.0  # טון גבוה יותר ב-2 חצאי טונים
+        pitch=2.0
     )
-
     response = client.synthesize_speech(
-        input=synthesis_input,
-        voice=voice,
-        audio_config=audio_config
+        input=synthesis_input, voice=voice, audio_config=audio_config
     )
-
     output_path = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
     with open(output_path, "wb") as out:
         out.write(response.audio_content)
@@ -160,14 +157,11 @@ def synthesize_with_google_tts(text: str) -> str:
 def upload_to_yemot(audio_path: str, yemot_full_path: str):
     """מעלה קובץ לשלוחה בימות המשיח."""
     url = "https://www.call2all.co.il/ym/api/UploadFile"
-    path_no_file = os.path.dirname(yemot_full_path)
-    file_name = os.path.basename(yemot_full_path)
-
     with open(audio_path, "rb") as f:
-        files = {"file": (file_name, f, "audio/wav")}
+        files = {"file": (os.path.basename(yemot_full_path), f, "audio/wav")}
         params = {
             "token": SYSTEM_TOKEN,
-            "path": f"{path_no_file}/{file_name}",
+            "path": yemot_full_path,
             "convertAudio": 1
         }
         response = requests.post(url, params=params, files=files)
@@ -175,23 +169,21 @@ def upload_to_yemot(audio_path: str, yemot_full_path: str):
         if data.get("responseStatus") == "OK":
             logging.info(f"✅ File uploaded successfully to {yemot_full_path}")
             return True
-        else:
-            logging.error(f"❌ Upload failed: {data}")
-            return False
+        logging.error(f"❌ Upload failed: {data}")
+        return False
 
 # ------------------ Routes ------------------
 
-@app.route("/health", methods=["GET"])
+@app.route("/health")
 def health():
     return Response("OK", status=200, mimetype="text/plain")
 
-@app.route("/upload_audio", methods=["GET"])
+@app.route("/upload_audio")
 def upload_audio():
     file_url = request.args.get("file_url")
     call_id = request.args.get("ApiCallId", str(int(time.time())))
     phone_number = request.args.get("ApiPhone", "unknown")
 
-    # בניית URL מלא לקובץ
     if not file_url.startswith("http"):
         file_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={SYSTEM_TOKEN}&path=ivr2:/{file_url}"
 
@@ -207,34 +199,26 @@ def upload_audio():
 
             processed_audio = add_silence(temp_input.name)
             recognized_text = recognize_speech(processed_audio)
-
             if not recognized_text:
-                return Response("לא זוהה דיבור ברור. אנא נסה שוב.", mimetype="text/plain")
+                return Response("לא זוהה דיבור ברור.", mimetype="text/plain")
 
-            # ניסוח דבר תורה עם הקשר קיים
             final_dvartorah = summarize_dvartorah_with_gemini(recognized_text, phone_number)
-
-            # המרת הטקסט לשמע
             tts_path = synthesize_with_google_tts(final_dvartorah)
 
-            # העלאה לימות המשיח – תת-תיקייה ייחודית לכל מאזין
-            yemot_folder = f"{BASE_YEMOT_FOLDER}/{call_id}"
-            yemot_full_path = f"{yemot_folder}/dvartorah.wav"
+            # שמירת קובץ בשם ייחודי בשלוחה 85
+            yemot_full_path = f"{BASE_YEMOT_FOLDER}/dvartorah_{call_id}.wav"
             upload_success = upload_to_yemot(tts_path, yemot_full_path)
             os.remove(tts_path)
 
             if upload_success:
-                # מעבר לשלוחה 000 לאחר ההשמעה
-                playback_command = f"go_to_folder_and_play=/85/{call_id},dvartorah.wav,0.go_to_folder=/85/5"
+                playback_command = f"go_to_folder_and_play=/85,dvartorah_{call_id}.wav,0.go_to_folder=/000"
                 logging.info(f"Returning IVR command: {playback_command}")
                 return Response(playback_command, mimetype="text/plain")
-
-            else:
-                return Response("שגיאה בהעלאת הקובץ לשרת.", mimetype="text/plain")
+            return Response("שגיאה בהעלאת הקובץ.", mimetype="text/plain")
 
     except Exception as e:
         logging.error(f"Critical error: {e}")
-        return Response(f"שגיאה קריטית בעיבוד: {e}", mimetype="text/plain")
+        return Response(f"שגיאה קריטית: {e}", mimetype="text/plain")
 
 # ------------------ Run ------------------
 if __name__ == "__main__":
