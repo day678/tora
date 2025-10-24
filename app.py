@@ -5,7 +5,6 @@ import json
 import logging
 import time
 import requests
-import re # ייבוא עבור ניקוי טקסט מאימוג'ים ותווים לא רצויים
 from flask import Flask, request, Response
 from pydub import AudioSegment
 import speech_recognition as sr
@@ -129,33 +128,12 @@ def summarize_dvartorah_with_gemini(text_to_summarize: str, phone_number: str) -
         return text_to_summarize
 
 def synthesize_with_google_tts(text: str) -> str:
-    """
-    ממיר טקסט לאודיו (WAV) בעזרת Google Cloud Text-to-Speech.
-    מוסיף ניקוי טקסט כדי להסיר כוכביות ותווים לא רצויים לפני ההמרה.
-    """
+    """ממיר טקסט לאודיו (WAV) בעזרת Google Cloud Text-to-Speech."""
     if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
         raise EnvironmentError("Google Cloud credentials not configured for TTS.")
 
-    # --- הוספת ניקוי טקסט ---
-    # 1. הסרת כוכביות
-    cleaned_text = text.replace('*', '') 
-    # 2. הסרת אימוג'ים ותווים שאינם נתמכים היטב ב-IVR
-    emoji_pattern = re.compile(
-        "["
-        "\U0001F600-\U0001F64F"  # emoticons
-        "\U0001F300-\U0001F5FF"  # symbols & pictographs
-        "\U0001F680-\U0001F6FF"  # transport & map symbols
-        "\U0001F1E0-\U0001F1FF"  # flags (iOS)
-        "\U00002702-\U000027B0"
-        "\U000024C2-\U0001F251"
-        "]+", flags=re.UNICODE
-    )
-    cleaned_text = emoji_pattern.sub(r'', cleaned_text)
-    # -------------------------
-
     client = texttospeech.TextToSpeechClient()
-    synthesis_input = texttospeech.SynthesisInput(text=cleaned_text) # שימוש בטקסט הנקי
-    
+    synthesis_input = texttospeech.SynthesisInput(text=text)
     voice = texttospeech.VoiceSelectionParams(
         language_code="he-IL",
         name="he-IL-Wavenet-B"
@@ -164,7 +142,7 @@ def synthesize_with_google_tts(text: str) -> str:
         audio_encoding=texttospeech.AudioEncoding.LINEAR16,
         sample_rate_hertz=16000,
         speaking_rate=1.15,
-        pitch=2.0
+        pitch=2.0  # טון גבוה יותר ב-2 חצאי טונים
     )
 
     response = client.synthesize_speech(
@@ -180,26 +158,16 @@ def synthesize_with_google_tts(text: str) -> str:
     return output_path
 
 def upload_to_yemot(audio_path: str, yemot_full_path: str):
-    """מעלה קובץ לשלוחה בימות המשיח. מותאם כעת להעלאה לתיקייה ראשית (/85) עם שם קובץ ייחודי."""
+    """מעלה קובץ לשלוחה בימות המשיח."""
     url = "https://www.call2all.co.il/ym/api/UploadFile"
-    
-    # Example: yemot_full_path = "ivr2:/85/dvartorah_12345.wav"
-    
-    # 1. מנקים את קידומת ה-ivr2:
-    path_with_file_name = yemot_full_path.replace('ivr2:', '') 
-    
-    # 2. מחלצים את נתיב התיקייה בלבד (לדוגמה: /85)
-    path_only = os.path.dirname(path_with_file_name) 
-    
-    # 3. שם הקובץ המלא (לדוגמה: dvartorah_ApiCallId.wav)
+    path_no_file = os.path.dirname(yemot_full_path)
     file_name = os.path.basename(yemot_full_path)
 
     with open(audio_path, "rb") as f:
         files = {"file": (file_name, f, "audio/wav")}
         params = {
             "token": SYSTEM_TOKEN,
-            "path": path_only,  # התיקייה /85 בלבד
-            "file_name": file_name,
+            "path": f"{path_no_file}/{file_name}",
             "convertAudio": 1
         }
         response = requests.post(url, params=params, files=files)
@@ -215,10 +183,6 @@ def upload_to_yemot(audio_path: str, yemot_full_path: str):
 
 @app.route("/health", methods=["GET"])
 def health():
-    """
-    Health Check / Keep-Alive Endpoint.
-    מחזיר OK כדי למנוע את הכיבוי האוטומטי של Render (Idle Timeout).
-    """
     return Response("OK", status=200, mimetype="text/plain")
 
 @app.route("/upload_audio", methods=["GET"])
@@ -250,40 +214,27 @@ def upload_audio():
             # ניסוח דבר תורה עם הקשר קיים
             final_dvartorah = summarize_dvartorah_with_gemini(recognized_text, phone_number)
 
-            # המרת הטקסט לשמע (הפונקציה כוללת כעת ניקוי של כוכביות ואימוג'ים)
+            # המרת הטקסט לשמע
             tts_path = synthesize_with_google_tts(final_dvartorah)
 
-            # --- התיקון הקריטי להעלאה לתיקייה אחת עם שם ייחודי ---
-            
-            # 1. יצירת שם קובץ ייחודי
-            FILE_NAME_WITH_ID = f"dvartorah_{call_id}.wav"
-            
-            # 2. בניית הנתיב המלא: ivr2:/85/dvartorah_<ApiCallId>.wav
-            yemot_full_path = f"{BASE_YEMOT_FOLDER}/{FILE_NAME_WITH_ID}" 
-            
+            # העלאה לימות המשיח – תת-תיקייה ייחודית לכל מאזין
+            yemot_folder = f"{BASE_YEMOT_FOLDER}/{call_id}"
+            yemot_full_path = f"{yemot_folder}/dvartorah.wav"
             upload_success = upload_to_yemot(tts_path, yemot_full_path)
             os.remove(tts_path)
 
             if upload_success:
-                # 3. החזרת פקודת השמעת קובץ ספציפי
-                
-                # שם התיקייה בלבד: /85
-                folder_to_play_from = BASE_YEMOT_FOLDER.replace('ivr2:', '')
-                
-                # הפקודה: go_to_folder_and_play=/85,dvartorah_<ApiCallId>.wav,/85/5
-                # הפקודה תנגן את הקובץ הספציפי מתוך שלוחה 85, ואז תעבור לשלוחה 85/5.
-                playback_command = f"go_to_folder_and_play={folder_to_play_from},{FILE_NAME_WITH_ID},/85/5"
-                
+                # מעבר לשלוחה 000 לאחר ההשמעה
+                playback_command = f"go_to_folder_and_play=/85/{call_id},dvartorah.wav,0.go_to_folder=/85/5"
                 logging.info(f"Returning IVR command: {playback_command}")
-                return Response(playback_command, status=200, mimetype='text/plain')
+                return Response(playback_command, mimetype="text/plain")
 
             else:
-                logging.error("Final upload failed. Returning error to IVR.")
-                return Response("שגיאה חמורה: נכשל בתהליך העלאת קובץ האודיו.", status=200, mimetype='text/plain')
+                return Response("שגיאה בהעלאת הקובץ לשרת.", mimetype="text/plain")
 
     except Exception as e:
         logging.error(f"Critical error: {e}")
-        return Response(f"שגיאה קריטית בעיבוד: {e}", status=200, mimetype='text/plain')
+        return Response(f"שגיאה קריטית בעיבוד: {e}", mimetype="text/plain")
 
 # ------------------ Run ------------------
 if __name__ == "__main__":
