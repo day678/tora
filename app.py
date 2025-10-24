@@ -98,7 +98,7 @@ def summarize_dvartorah_with_gemini(text_to_summarize: str, phone_number: str) -
         "אם ההודעה החדשה ממשיכה את אותו נושא – שלב אותה יחד עם הקודמות בסיכום אחד זורם. "
         "אם נראה שהיא נושא חדש לגמרי – התחל דבר תורה חדש נפרד, בלי קשר לטקסטים הישנים. "
         "נסח מחדש את הטקסט המועתק ל'דבר תורה' קצר, ברור ומכובד. "
-        "אין להשתמש כלל בסימני * או אימוג'ים וכדומה, בפלא לא יהיה שום כוכביות. "
+        "אין להשתמש כלל בסימני * או אימוג'ים וכדומה, בפלט לא יהיה שום כוכביות. "
         "בתחילת הסיכום תגיד בנוסח שלך משהו כמו שהדברים שנאמרו נפלאים ואתה מסכם אותם, ואז תסכם בקצרה. "
         "אם זה לא דבר תורה, אמור רק שאתה לא יכול לסכם נושאים שאינם דברי תורה."
         f"דברי תורה שנאמרו עד כה:\n{context_text}"
@@ -141,7 +141,8 @@ def synthesize_with_google_tts(text: str) -> str:
     audio_config = texttospeech.AudioConfig(
         audio_encoding=texttospeech.AudioEncoding.LINEAR16,
         sample_rate_hertz=16000,
-        speaking_rate=1.15
+        speaking_rate=1.15,
+        pitch=2.0  # טון גבוה יותר ב-2 חצאי טונים
     )
 
     response = client.synthesize_speech(
