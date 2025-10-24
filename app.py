@@ -67,10 +67,10 @@ def summarize_dvartorah_with_gemini(text_to_summarize: str) -> str:
 
     API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent"
     prompt = (
-        "אתה עורך תורני ומנסח דברי תורה. נסח מחדש את הטקסט המועתק ל'דבר תורה' קצר, ברור ומכובד. "
-        "אין להשתמש בסימני * או אימוג'ים וכדומה. "
+        "אתה עורך תורני ומנסח דברי תורה. נסח מחדש את הטקסט המועתק ל'דבר תורה' מתומצת וברור . "
+        "אין להשתמש בסימני * או אימוג'ים וכדומה, שלא יהיהבפלט שום כוכבית. "
         "בתחילת הסיכום תגיד בנוסח שלך משהו כמו שהדברים שנאמרו נפלאים ואתה מסכם אותם, ואז תסכם בקצרה. "
-        "אם זה לא דבר תורה, אמור רק שאתה לא יכול לסכם נושאים שאינם דברי תורה."
+        "אם זה לא דבר תורה, אמור רק (בנוסח שלך) שאתה לא יכול לסכם נושאים בלימוד."
     )
 
     payload = {
@@ -197,8 +197,10 @@ def upload_audio():
             os.remove(tts_path)
 
             if upload_success:
-                # מעבר לשלוחה של המאזין (85/<call_id>) והשמעת הקובץ שלו
-                playback_command = f"go_to_folder_and_play=/85/{call_id},{yemot_filename},0"
+                # מעבר לשלוחה האישית של המאזין -> השמעה -> חזרה לשלוחה 000
+                playback_command = (
+                    f"go_to_folder_and_play=/85/{call_id},{yemot_filename},0.go_to_folder=/000"
+                )
                 logging.info(f"Returning IVR command: {playback_command}")
                 return Response(playback_command, status=200, mimetype="text/plain")
             else:
