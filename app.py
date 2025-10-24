@@ -79,7 +79,7 @@ def summarize_dvartorah_with_gemini(text_to_summarize: str, phone_number: str) -
         except Exception:
             pass
 
-    # ניקוי היסטוריה ישנה (מעל 24 שעות)
+    # ניקוי היסטוריה ישנה (מעל 48 שעות)
     if time.time() - history.get("last_updated", 0) > 48 * 3600:
         history = {"messages": [], "last_updated": time.time()}
 
@@ -98,9 +98,9 @@ def summarize_dvartorah_with_gemini(text_to_summarize: str, phone_number: str) -
         "אם ההודעה החדשה ממשיכה את אותו נושא – שלב אותה יחד עם הקודמות בסיכום אחד זורם. "
         "אם נראה שהיא נושא חדש לגמרי – התחל דבר תורה חדש נפרד, בלי קשר לטקסטים הישנים. "
         "נסח מחדש את הטקסט המועתק ל'דבר תורה' קצר, ברור ומכובד. "
-        "אין להשתמש כלל בסימני * או אימוג'ים וכדומה, בפלא לא יהיה שום כוכביות. "
+        "אין להשתמש כלל בסימני * או אימוג'ים וכדומה, בפלט לא יהיה שום כוכביות. "
         "בתחילת הסיכום תגיד בנוסח שלך משהו כמו שהדברים שנאמרו נפלאים ואתה מסכם אותם, ואז תסכם בקצרה. "
-        "אם זה לא דבר תורה, אמור רק שאתה לא יכול לסכם נושאים שאינם דברי תורה."
+        "אם זה לא דבר תורה, אמור רק (בנוסח שלך) שאתה לא יכול לסכם נושאים שאינם דברי תורה."
         f"דברי תורה שנאמרו עד כה:\n{context_text}"
     )
 
@@ -159,14 +159,22 @@ def synthesize_with_google_tts(text: str) -> str:
 def upload_to_yemot(audio_path: str, yemot_full_path: str):
     """מעלה קובץ לשלוחה בימות המשיח."""
     url = "https://www.call2all.co.il/ym/api/UploadFile"
-    path_no_file = os.path.dirname(yemot_full_path)
+    
+    # 1. מנקים את קידומת ה-ivr2: (מקבלים /85/ApiCallId/dvartorah.wav)
+    path_with_file_name = yemot_full_path.replace('ivr2:', '') 
+    
+    # 2. מחלצים את נתיב התיקייה בלבד (לדוגמה: /85/ApiCallId)
+    path_only = os.path.dirname(path_with_file_name) 
+    
+    # 3. שם הקובץ
     file_name = os.path.basename(yemot_full_path)
 
     with open(audio_path, "rb") as f:
         files = {"file": (file_name, f, "audio/wav")}
         params = {
             "token": SYSTEM_TOKEN,
-            "path": f"{path_no_file}/{file_name}",
+            "path": path_only,  # ה-path המתוקן: התיקייה האישית (/85/ApiCallId)
+            "file_name": file_name,
             "convertAudio": 1
         }
         response = requests.post(url, params=params, files=files)
@@ -182,6 +190,10 @@ def upload_to_yemot(audio_path: str, yemot_full_path: str):
 
 @app.route("/health", methods=["GET"])
 def health():
+    """
+    Health Check / Keep-Alive Endpoint.
+    מחזיר OK כדי למנוע את הכיבוי האוטומטי של Render (Idle Timeout).
+    """
     return Response("OK", status=200, mimetype="text/plain")
 
 @app.route("/upload_audio", methods=["GET"])
@@ -217,23 +229,31 @@ def upload_audio():
             tts_path = synthesize_with_google_tts(final_dvartorah)
 
             # העלאה לימות המשיח – תת-תיקייה ייחודית לכל מאזין
-            yemot_folder = f"{BASE_YEMOT_FOLDER}/{call_id}"
-            yemot_full_path = f"{yemot_folder}/dvartorah.wav"
+            YEMOT_PERSONAL_FOLDER = f"{BASE_YEMOT_FOLDER}/{call_id}" # ivr2:/85/ApiCallId
+            yemot_full_path = f"{YEMOT_PERSONAL_FOLDER}/{YEMOT_FILE_NAME}"
             upload_success = upload_to_yemot(tts_path, yemot_full_path)
             os.remove(tts_path)
 
             if upload_success:
-                # מעבר לשלוחה 000 לאחר ההשמעה
-                playback_command = f"go_to_folder_and_play=/85/{call_id},dvartorah.wav,0\napi_end_goto=/85/5"
+                # 6. החזרת פקודת מעבר לשלוחה (go_to_folder)
+                
+                # מפיקים את שם השלוחה האישית לנתיב IVR: /85/ApiCallId
+                folder_to_go = YEMOT_PERSONAL_FOLDER.replace('ivr2:', '')
+                
+                # הפקודה: go_to_folder=/85/ApiCallId
+                # המאזין יועבר לתיקייה האישית שלו, שם הוא ישמע את הקובץ dvartorah.wav
+                playback_command = f"go_to_folder={folder_to_go}"
+                
                 logging.info(f"Returning IVR command: {playback_command}")
-                return Response(playback_command, mimetype="text/plain")
+                return Response(playback_command, status=200, mimetype='text/plain')
 
             else:
-                return Response("שגיאה בהעלאת הקובץ לשרת.", mimetype="text/plain")
+                logging.error("Final upload failed. Returning error to IVR.")
+                return Response("שגיאה חמורה: נכשל בתהליך העלאת קובץ האודיו.", status=200, mimetype='text/plain')
 
     except Exception as e:
         logging.error(f"Critical error: {e}")
-        return Response(f"שגיאה קריטית בעיבוד: {e}", mimetype="text/plain")
+        return Response(f"שגיאה קריטית בעיבוד: {e}", status=200, mimetype='text/plain')
 
 # ------------------ Run ------------------
 if __name__ == "__main__":
