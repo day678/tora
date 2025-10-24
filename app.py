@@ -224,7 +224,7 @@ def upload_audio():
 
             if upload_success:
                 # מעבר לשלוחה 000 לאחר ההשמעה
-                playback_command = f"go_to_folder_and_play=/85/{call_id},dvartorah.wav,0.go_to_folder=/85/5"
+                playback_command = f"go_to_folder_and_play=/85/{call_id},dvartorah.wav,0\napi_end_goto=/85/5"
                 logging.info(f"Returning IVR command: {playback_command}")
                 return Response(playback_command, mimetype="text/plain")
 
