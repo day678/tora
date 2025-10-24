@@ -23,11 +23,7 @@ app = Flask(__name__)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_CREDENTIALS_B64 = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_B64")
 
-# הגדרת נתיב העלאת הקובץ ונקודת מעבר לאחר ההשמעה
-YEMOT_UPLOAD_FOLDER = "ivr2:/85" # לדוגמה: מעלה לתיקייה 85 בראשי (ivr2)
-YEMOT_FILE_NAME = "dvartorah.wav"
-
-# יצירת קובץ JSON זמני עם המפתח של Google Cloud
+# ------------------ Google credentials ------------------
 if GOOGLE_CREDENTIALS_B64:
     creds_json = base64.b64decode(GOOGLE_CREDENTIALS_B64).decode("utf-8")
     temp_cred_path = "/tmp/google_creds.json"
@@ -41,13 +37,13 @@ else:
 # ------------------ Helper Functions ------------------
 
 def add_silence(input_path: str) -> AudioSegment:
-    """מוסיף שניית שקט לפני ואחרי קטע האודיו כדי לשפר את הדיוק בזיהוי דיבור."""
+    """מוסיף שניית שקט לפני ואחרי האודיו לשיפור זיהוי דיבור."""
     audio = AudioSegment.from_file(input_path, format="wav")
     silence = AudioSegment.silent(duration=1000)
     return silence + audio + silence
 
 def recognize_speech(audio_segment: AudioSegment) -> str:
-    """מבצע זיהוי דיבור בעברית באמצעות Google Speech Recognition."""
+    """ממיר דיבור לטקסט בעברית בעזרת Google Speech Recognition."""
     recognizer = sr.Recognizer()
     try:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_wav:
@@ -64,19 +60,17 @@ def recognize_speech(audio_segment: AudioSegment) -> str:
         return ""
 
 def summarize_dvartorah_with_gemini(text_to_summarize: str) -> str:
-    """ניסוח דבר תורה יפה ומסודר עם Gemini (כולל פיסוק)."""
+    """מסכם דבר תורה בעזרת Gemini בצורה מכובדת וברורה."""
     if not text_to_summarize or not GEMINI_API_KEY:
         logging.warning("Skipping Gemini summarization: Missing text or API key.")
         return "שגיאה: לא ניתן לנסח דבר תורה."
 
     API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent"
-    # הנחיה המדגישה פיסוק מלא לשיפור איכות ה-TTS
     prompt = (
         "אתה עורך תורני ומנסח דברי תורה. נסח מחדש את הטקסט המועתק ל'דבר תורה' קצר, ברור ומכובד. "
         "אין להשתמש בסימני * או אימוג'ים וכדומה. "
-        "בתחילת הסיכום תגיד בקצרה (בנוסח שלך) משהו כמו שהדברים שנאמרו נפלאים ואתה מסכם אותם. ואז תסכם את מה שנכתב בתמלול בקצרה. אין להוסיף שום דבר משלך. "
-        "הפלט צריך להיות רק הכותרת והטקסט."
-        "אם הטקסט אינו דבר תורה - אל תסכם אותו כלל. רק תאמר (בנוסח של) שאתה לא יכול לענות על שום שאלה או לדבר על נושאים אחרים, אלא יכול רק לסכם את דברי התורה הנאמרים."
+        "בתחילת הסיכום תגיד בנוסח שלך משהו כמו שהדברים שנאמרו נפלאים ואתה מסכם אותם, ואז תסכם בקצרה. "
+        "אם זה לא דבר תורה, אמור רק שאתה לא יכול לסכם נושאים שאינם דברי תורה."
     )
 
     payload = {
@@ -84,49 +78,42 @@ def summarize_dvartorah_with_gemini(text_to_summarize: str) -> str:
         "systemInstruction": {"parts": [{"text": prompt}]},
         "generationConfig": {"temperature": 0.3}
     }
-    
-    last_error_message = "שגיאה בניסוח."
-    MAX_RETRIES = 2
 
-    for attempt in range(MAX_RETRIES):
+    for attempt in range(2):
         try:
-            if attempt > 0: time.sleep(1)
+            if attempt > 0:
+                time.sleep(1)
             response = requests.post(f"{API_URL}?key={GEMINI_API_KEY}", json=payload, timeout=25)
             response.raise_for_status()
             data = response.json()
-            result = data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '').strip()
+            result = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
             return result or text_to_summarize
         except Exception as e:
             logging.error(f"Gemini API error (Attempt {attempt+1}): {e}")
-            last_error_message = f"שגיאת AI: {str(e)}"
-            if attempt == MAX_RETRIES - 1:
-                break
-    
-    return f"כשל בניסוח דבר התורה. {last_error_message}. נשמיע את התמלול המקורי: {text_to_summarize}"
-
+    return text_to_summarize
 
 def synthesize_with_google_tts(text: str) -> str:
-    """ממיר טקסט לקובץ שמע WAV (LINEAR16) בעזרת Google Cloud TTS."""
+    """יוצר קובץ שמע WAV (LINEAR16) בעזרת Google Cloud TTS."""
     if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
         raise EnvironmentError("Google Cloud credentials not configured for TTS.")
 
     client = texttospeech.TextToSpeechClient()
     synthesis_input = texttospeech.SynthesisInput(text=text)
 
-    # שימוש בקול Wavenet איכותי בעברית
     voice = texttospeech.VoiceSelectionParams(
         language_code="he-IL",
-        name="he-IL-Wavenet-B"  # קול גברי טבעי בעברית
+        name="he-IL-Wavenet-B"
     )
 
-    # פורמט אודיו WAV (LINEAR16)
     audio_config = texttospeech.AudioConfig(
         audio_encoding=texttospeech.AudioEncoding.LINEAR16,
-        sample_rate_hertz=16000, 
+        sample_rate_hertz=16000,
         speaking_rate=1.2
     )
-    
-    response = client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
+
+    response = client.synthesize_speech(
+        input=synthesis_input, voice=voice, audio_config=audio_config
+    )
 
     output_path = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
     with open(output_path, "wb") as out:
@@ -135,7 +122,7 @@ def synthesize_with_google_tts(text: str) -> str:
     return output_path
 
 def upload_to_yemot(audio_path: str, yemot_full_path: str):
-    """מעלה קובץ לימות המשיח לשלוחה שנבחרה."""
+    """מעלה קובץ לימות המשיח."""
     system_token = "0733181406:80809090"
     url = "https://www.call2all.co.il/ym/api/UploadFile"
 
@@ -143,12 +130,11 @@ def upload_to_yemot(audio_path: str, yemot_full_path: str):
     file_name = os.path.basename(yemot_full_path)
 
     with open(audio_path, "rb") as f:
-        files = {"file": (file_name, f, 'audio/wav')}
+        files = {"file": (file_name, f, "audio/wav")}
         params = {
             "token": system_token,
-            "path": path_no_file,
-            "file_name": file_name, # הגדרת שם הקובץ במפורש
-            "convertAudio": 1 # ממליץ להשאיר כדי שימות יוודא פורמט תקין
+            "path": f"{path_no_file}/{file_name}",
+            "convertAudio": 1
         }
         response = requests.post(url, params=params, files=files)
         data = response.json()
@@ -170,7 +156,12 @@ def upload_audio():
     file_url = request.args.get("file_url")
     system_token = "0733181406:80809090"
 
-    # --- יצירת URL לקובץ המקור ---
+    # מזהה שיחה ייחודי לכל מאזין
+    call_id = request.args.get("ApiCallId", str(int(time.time())))
+    yemot_folder = f"ivr2:/85/{call_id}"
+    yemot_filename = f"dvartorah_{call_id}.wav"
+
+    # יצירת URL להורדת הקובץ המקורי
     if not file_url:
         stockname = request.args.get("stockname")
         if stockname:
@@ -197,51 +188,25 @@ def upload_audio():
             if not recognized_text:
                 return Response("לא זוהה דיבור ברור. נסה שוב.", mimetype="text/plain")
 
-            # 1. ניסוח דבר תורה
             final_dvartorah = summarize_dvartorah_with_gemini(recognized_text)
-
-            # 2. הפקת אודיו עם Google Cloud TTS
             tts_path = synthesize_with_google_tts(final_dvartorah)
 
-            # 3. העלאה לימות המשיח
-            yemot_full_path = f"{YEMOT_UPLOAD_FOLDER}/{YEMOT_FILE_NAME}"
+            yemot_full_path = f"{yemot_folder}/{yemot_filename}"
             upload_success = upload_to_yemot(tts_path, yemot_full_path)
-            
-            # 4. מחיקת קובץ ה-TTS המקומי (ניקוי)
+
             os.remove(tts_path)
 
             if upload_success:
-                # 5. החזרת פקודת השמעה ל-IVR (הפקודה חייבת להיות בטקסט פשוט)
-                # go_to_folder_and_play=שלוחה,קובץ,0.
-                # אנחנו משתמשים בנתיב היחסי של הקובץ (שלוחה 85), ומורים למערכת לעבור אח"כ ל-POST_PLAYBACK_GOTO
-                
-                # הפקודה המלאה תהיה: go_to_folder_and_play=/85,dvartorah.wav,0.
-                # הערה: מכיוון שימות דורש go_to_folder_and_play=שלוחה,קובץ...
-                # והשלוחה לאן לעבור אחרי ההשמעה מוגדרת ב-api_end_goto
-                # אנחנו מחזירים רק את הפעולה הראשית go_to_folder_and_play
-                
-                # אם נרצה לעבור לשלוחה POST_PLAYBACK_GOTO לאחר ההשמעה, נשתמש בשרשור פעולות (אפשרות ב'):
-                # אפשרות א': go_to_folder_and_play=/85,dvartorah.wav,0
-                # אפשרות ב' (מומלץ): go_to_folder_and_play=/85,dvartorah.wav,0.go_to_folder=/ (במקרה של תשובת שרת שמכילה הגדרות)
-                
-                # מכיוון שהקוד שלנו מחזיר פקודה אחת, הפקודה go_to_folder_and_play תשמיע ותחזור ל-api_end_goto המוגדר.
-                
-                # אנחנו משתמשים בנתיב המלא של הקובץ כפי שהועלה: 85/dvartorah.wav
-                # כדי להבטיח שהשלוחה תמצא את הקובץ בלי קשר לשלוחה שבה היא נמצאת
-                
-                # הפקודה הבאה תורה ל-IVR להשמיע את הקובץ הספציפי שהועלה
-                playback_command = f"go_to_folder_and_play={YEMOT_UPLOAD_FOLDER.replace('ivr2:', '')},{YEMOT_FILE_NAME},0"
-                
+                # מעבר לשלוחה של המאזין (85/<call_id>) והשמעת הקובץ שלו
+                playback_command = f"go_to_folder_and_play=/85/{call_id},{yemot_filename},0"
                 logging.info(f"Returning IVR command: {playback_command}")
-                return Response(playback_command, status=200, mimetype='text/plain')
-
+                return Response(playback_command, status=200, mimetype="text/plain")
             else:
-                logging.error("Final upload failed. Returning error to IVR.")
-                return Response("שגיאה חמורה: נכשל בתהליך העלאת קובץ האודיו.", status=200, mimetype='text/plain')
+                return Response("שגיאה חמורה: העלאת הקובץ נכשלה.", status=200, mimetype="text/plain")
 
     except Exception as e:
         logging.error(f"Critical error: {e}")
-        return Response(f"שגיאה קריטית בעיבוד: {e}", status=200, mimetype='text/plain')
+        return Response(f"שגיאה קריטית בעיבוד: {e}", status=200, mimetype="text/plain")
 
 # ------------------ Run ------------------
 if __name__ == "__main__":
