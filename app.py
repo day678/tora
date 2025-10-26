@@ -149,7 +149,7 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
         except Exception:
             pass
 
-        if time.time() - history.get("last_updated", 0) > 48 * 3600:
+        if time.time() - history.get("last_updated", 0) > 1 * 3600:
             history = {"messages": [], "last_updated": time.time()}
 
         history["messages"].append(text_to_summarize)
