@@ -88,7 +88,7 @@ def clean_text_for_tts(text: str) -> str:
 
 
 def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
-    """מסכם דבר תורה עם או בלי זיכרון."""
+    """מסכם דבר תורה עם או בלי זיכרון, כולל שני ניסיונות במקרה של שגיאה."""
     if not text_to_summarize or not GEMINI_API_KEY:
         logging.warning("Skipping Gemini summarization: Missing text or API key.")
         return "שגיאה: לא ניתן לנסח דבר תורה."
@@ -128,20 +128,27 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
     }
 
     API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent"
-    try:
-        response = requests.post(f"{API_URL}?key={GEMINI_API_KEY}", json=payload, timeout=35)
-        response.raise_for_status()
-        data = response.json()
-        result = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
 
-        if remember_history:
-            with open(history_path, "w", encoding="utf-8") as f:
-                json.dump(history, f, ensure_ascii=False, indent=2)
+    MAX_RETRIES = 2
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = requests.post(f"{API_URL}?key={GEMINI_API_KEY}", json=payload, timeout=35)
+            response.raise_for_status()
+            data = response.json()
+            result = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
 
-        return result or text_to_summarize
-    except Exception as e:
-        logging.error(f"Gemini API error: {e}")
-        return text_to_summarize
+            if remember_history:
+                with open(history_path, "w", encoding="utf-8") as f:
+                    json.dump(history, f, ensure_ascii=False, indent=2)
+
+            return result or text_to_summarize
+
+        except Exception as e:
+            logging.error(f"Gemini API error (Attempt {attempt + 1}/{MAX_RETRIES}): {e}")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(1)
+                continue
+            return text_to_summarize
 
 
 def synthesize_with_google_tts(text: str) -> str:
