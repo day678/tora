@@ -30,6 +30,12 @@ BASE_YEMOT_FOLDER = "ivr2:/85"  # שלוחה ראשית לכל הקבצים
 INSTRUCTIONS_CONTINUE_FILE = "instructions_continue.txt"
 INSTRUCTIONS_NEW_FILE = "instructions_new.txt"
 
+# --- NEW CONFIGURATION FOR VOCALIZATION ---
+VOCALIZED_WORDS_FILE = "vocalized_words.txt"
+VOCALIZATION_LEXICON = {}
+# ------------------------------------------
+
+
 # יצירת קובץ זמני למפתח של Google Cloud
 if GOOGLE_CREDENTIALS_B64:
     creds_json = base64.b64decode(GOOGLE_CREDENTIALS_B64).decode("utf-8")
@@ -43,6 +49,51 @@ else:
 
 
 # ------------------ Helper Functions ------------------
+
+# --- NEW FUNCTION TO LOAD LEXICON ---
+def load_vocalization_lexicon(file_path: str) -> dict:
+    """קורא את קובץ הלקסיקון ומחזיר מילון של מילה לא מנוקדת -> מילה מנוקדת."""
+    lexicon = {}
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if "=" in line:
+                    unvocalized, vocalized = line.strip().split("=", 1)
+                    if unvocalized and vocalized:
+                        # השמירה במילון היא {מילה לא מנוקדת: מילה מנוקדת}
+                        # מנקים את המילים מתווים מיותרים לפני השמירה
+                        unvocalized_clean = re.sub(r'[^\w]', '', unvocalized.strip())
+                        vocalized_clean = vocalized.strip()
+                        if unvocalized_clean:
+                            lexicon[unvocalized_clean] = vocalized_clean
+        logging.info(f"✅ Loaded {len(lexicon)} words from the vocalization lexicon: {file_path}")
+        return lexicon
+    except FileNotFoundError:
+        logging.warning(f"⚠️ Vocalization lexicon file {file_path} not found.")
+        return {}
+    except Exception as e:
+        logging.error(f"❌ Error loading vocalization lexicon: {e}")
+        return {}
+
+
+# --- NEW FUNCTION TO APPLY VOCALIZATION ---
+def apply_vocalization_to_text(text: str, lexicon: dict) -> str:
+    """מחליף מילים בטקסט במילים המנוקדות שלהן מהלקסיקון."""
+    if not lexicon:
+        return text
+
+    # כדי לוודא שאנחנו מחליפים מילים שלמות ולא תתי-מחרוזות, נשתמש ב-re.sub עם גבולות מילים.
+    modified_text = text
+    for unvocalized, vocalized in lexicon.items():
+        # שימוש ב-re.escape כדי לוודא שתווים מיוחדים (כמו סוגריים) ב-unvocalized מטופלים כראוי
+        # השימוש ב-\b מבטיח החלפה של מילה שלמה בלבד.
+        pattern = r'\b' + re.escape(unvocalized) + r'\b'
+        # משתמשים ב-re.sub להחלפת המילים
+        modified_text = re.sub(pattern, vocalized, modified_text)
+
+    return modified_text
+
+# ------------------------------------------
 
 def add_silence(input_path: str) -> AudioSegment:
     """מוסיף שניית שקט לפני ואחרי קטע האודיו כדי לשפר את הדיוק בזיהוי דיבור."""
@@ -82,7 +133,8 @@ def load_instructions(file_path: str) -> str:
 def clean_text_for_tts(text: str) -> str:
     """מסיר אימוג'ים, סימונים ואותיות לועזיות כדי למנוע הקראת תווים מיותרים."""
     text = re.sub(r'[A-Za-z*#@^_^~\[\]{}()<>+=_|\\\/]', '', text)
-    text = re.sub(r'[^\w\s,.!?אבגדהוזחטיכלמנסעפצקרשתםןףךץ]', '', text)
+    # שומרים על אותיות ניקוד בגלל הלקסיקון החדש, אבל מנקים סימנים לא רצויים
+    text = re.sub(r'[^\w\s,.!?א-תְִֵֶָֹֻּׁ]', '', text)
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
@@ -153,11 +205,27 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
 
 def synthesize_with_google_tts(text: str) -> str:
     """ממיר טקסט לאודיו (WAV) בעזרת Google Cloud Text-to-Speech."""
-    text = clean_text_for_tts(text)
+    
+    # --- MODIFICATION START: Apply Vocalization from Lexicon ---
+    global VOCALIZATION_LEXICON
+    if not VOCALIZATION_LEXICON:
+        # טוען את הלקסיקון רק אם הוא ריק (Lazy Load)
+        VOCALIZATION_LEXICON = load_vocalization_lexicon(VOCALIZED_WORDS_FILE)
+    
+    # החלפת מילים לא מנוקדות במילים מנוקדות מהלקסיקון
+    text_with_vocalization = apply_vocalization_to_text(text, VOCALIZATION_LEXICON)
+    # --- MODIFICATION END ---
+    
+    # עכשיו מנקים את הטקסט אחרי ההחלפה
+    text_to_synthesize = clean_text_for_tts(text_with_vocalization)
+    
     if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
         raise EnvironmentError("Google Cloud credentials not configured for TTS.")
+    
     client = texttospeech.TextToSpeechClient()
-    synthesis_input = texttospeech.SynthesisInput(text=text)
+    # משתמשים בטקסט המעובד שלנו כקלט לסינתזה
+    synthesis_input = texttospeech.SynthesisInput(text=text_to_synthesize)
+    
     voice = texttospeech.VoiceSelectionParams(language_code="he-IL", name="he-IL-Wavenet-B")
     audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.LINEAR16, sample_rate_hertz=16000, speaking_rate=1.15, pitch=2.0)
     response = client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
@@ -245,6 +313,9 @@ def upload_audio_new():
 
 
 # ------------------ Run ------------------
+# טוענים את הלקסיקון לפני הפעלת האפליקציה כדי שיהיה זמין לכל הקריאות
+VOCALIZATION_LEXICON = load_vocalization_lexicon(VOCALIZED_WORDS_FILE)
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
