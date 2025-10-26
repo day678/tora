@@ -5,11 +5,12 @@ import json
 import logging
 import time
 import requests
+import threading
+import re
 from flask import Flask, request, Response
 from pydub import AudioSegment
 import speech_recognition as sr
 from google.cloud import texttospeech
-import re
 
 # ------------------ Logging ------------------
 logging.basicConfig(
@@ -88,7 +89,7 @@ def clean_text_for_tts(text: str) -> str:
 
 
 def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
-    """מסכם דבר תורה עם או בלי זיכרון, כולל שני ניסיונות במקרה של שגיאה."""
+    """מסכם דבר תורה עם או בלי זיכרון."""
     if not text_to_summarize or not GEMINI_API_KEY:
         logging.warning("Skipping Gemini summarization: Missing text or API key.")
         return "שגיאה: לא ניתן לנסח דבר תורה."
@@ -107,7 +108,6 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
         except Exception:
             pass
 
-        # ניקוי היסטוריה ישנה
         if time.time() - history.get("last_updated", 0) > 48 * 3600:
             history = {"messages": [], "last_updated": time.time()}
 
@@ -116,7 +116,6 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
         history["last_updated"] = time.time()
         context_text = "\n---\n".join(history["messages"])
     else:
-        # ללא זיכרון
         history = {"messages": [text_to_summarize], "last_updated": time.time()}
         context_text = text_to_summarize
 
@@ -124,31 +123,32 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
 
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.3}
+        "generationConfig": {
+            "temperature": 0.3,
+            "max_output_tokens": 300  # הגבלת אורך התגובה לשיפור מהירות
+        }
     }
 
     API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent"
 
-    MAX_RETRIES = 2
-    for attempt in range(MAX_RETRIES):
+    last_error = None
+    for attempt in range(2):  # שני ניסיונות בלבד
         try:
             response = requests.post(f"{API_URL}?key={GEMINI_API_KEY}", json=payload, timeout=35)
             response.raise_for_status()
             data = response.json()
             result = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
-
             if remember_history:
                 with open(history_path, "w", encoding="utf-8") as f:
                     json.dump(history, f, ensure_ascii=False, indent=2)
-
-            return result or text_to_summarize
-
+            if result:
+                return result
         except Exception as e:
-            logging.error(f"Gemini API error (Attempt {attempt + 1}/{MAX_RETRIES}): {e}")
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(1)
-                continue
-            return text_to_summarize
+            logging.error(f"Gemini API error (attempt {attempt+1}): {e}")
+            last_error = e
+            time.sleep(1)
+
+    return text_to_summarize if last_error else "שגיאה לא צפויה."
 
 
 def synthesize_with_google_tts(text: str) -> str:
@@ -214,7 +214,15 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
             if not recognized_text:
                 return Response("לא זוהה דיבור ברור. אנא נסה שוב.", mimetype="text/plain")
 
-            final_dvartorah = summarize_with_gemini(recognized_text, phone_number, instruction_file, remember_history)
+            # נריץ את Gemini ברקע (thread)
+            gemini_result = {}
+            def run_gemini():
+                gemini_result["text"] = summarize_with_gemini(recognized_text, phone_number, instruction_file, remember_history)
+            gemini_thread = threading.Thread(target=run_gemini)
+            gemini_thread.start()
+            gemini_thread.join()  # ממתין רק עד סיום תהליך Gemini
+
+            final_dvartorah = gemini_result.get("text", recognized_text)
             tts_path = synthesize_with_google_tts(final_dvartorah)
 
             yemot_full_path = f"{BASE_YEMOT_FOLDER}/dvartorah_{call_id}.wav"
