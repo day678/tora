@@ -125,7 +125,7 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.6,
-            "max_output_tokens": 900  # הגבלת אורך התגובה לשיפור מהירות
+            "max_output_tokens": 1300  # הגבלת אורך התגובה לשיפור מהירות
         }
     }
 
