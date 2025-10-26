@@ -12,15 +12,6 @@ from pydub import AudioSegment
 import speech_recognition as sr
 from google.cloud import texttospeech
 
-# ------------------ Logging ------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%H:%M:%S"
-)
-
-app = Flask(__name__)
-
 # ------------------ Configuration ------------------
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_CREDENTIALS_B64 = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_B64")
@@ -30,6 +21,20 @@ BASE_YEMOT_FOLDER = "ivr2:/85"  # שלוחה ראשית לכל הקבצים
 
 INSTRUCTIONS_CONTINUE_FILE = "instructions_continue.txt"
 INSTRUCTIONS_NEW_FILE = "instructions_new.txt"
+
+# --- חדש: קובץ לקסיקון מנוקד ---
+VOWELIZED_LEXICON_FILE = "vowelized_lexicon.txt"
+VOWELIZED_LEXICON = {}
+# ------------------------------
+
+# ------------------ Logging ------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%H:%M:%S"
+)
+
+app = Flask(__name__)
 
 # יצירת קובץ זמני למפתח של Google Cloud
 if GOOGLE_CREDENTIALS_B64:
@@ -44,6 +49,22 @@ else:
 
 
 # ------------------ Helper Functions ------------------
+
+def load_vowelized_lexicon():
+    """טוען את קובץ המילים המנוקדות לזיכרון."""
+    global VOWELIZED_LEXICON
+    try:
+        with open(VOWELIZED_LEXICON_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split(":")
+                if len(parts) == 2 and parts[0] and parts[1]:
+                    # מפתח: מילה לא מנוקדת, ערך: מילה מנוקדת
+                    VOWELIZED_LEXICON[parts[0].strip()] = parts[1].strip()
+        logging.info(f"✅ Loaded {len(VOWELIZED_LEXICON)} words into the vowelized lexicon.")
+    except FileNotFoundError:
+        logging.warning(f"⚠️ Lexicon file {VOWELIZED_LEXICON_FILE} not found. Running without custom pronunciation.")
+    except Exception as e:
+        logging.error(f"❌ Error loading lexicon: {e}")
 
 def add_silence(input_path: str) -> AudioSegment:
     """מוסיף שניית שקט לפני ואחרי קטע האודיו כדי לשפר את הדיוק בזיהוי דיבור."""
@@ -86,6 +107,26 @@ def clean_text_for_tts(text: str) -> str:
     text = re.sub(r'[^\w\s,.!?אבגדהוזחטיכלמנסעפצקרשתםןףךץ]', '', text)
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
+
+def apply_vowelized_lexicon(text: str) -> str:
+    """מחליף מילים לא מנוקדות במילים מנוקדות מהלקסיקון ויוצר SSML."""
+    if not VOWELIZED_LEXICON:
+        # אם הלקסיקון ריק, מחזירים טקסט רגיל עטוף ב-SSML
+        return f'<speak lang="he-IL">{text}</speak>'
+
+    # נשתמש בביטוי רגולרי למציאת מילים כדי לא לפגוע בסימני פיסוק.
+    # המילה המקורית חייבת להיות מילה שלמה.
+    processed_text = text
+    for unvowelized, vowelized in VOWELIZED_LEXICON.items():
+        # יצירת תבנית regex שתחפש את המילה המלאה (unvowelized)
+        # תוך התחשבות ב-Word Boundaries (\b)
+        pattern = r'\b' + re.escape(unvowelized) + r'\b'
+        
+        # החלפת כל המופעים של המילה הלא מנוקדת במילה המנוקדת
+        processed_text = re.sub(pattern, vowelized, processed_text)
+
+    # עוטפים את התוצאה ב-SSML כדי לאפשר קריאה של הניקוד
+    return f'<speak lang="he-IL">{processed_text}</speak>'
 
 
 def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
@@ -153,14 +194,26 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
 
 def synthesize_with_google_tts(text: str) -> str:
     """ממיר טקסט לאודיו (WAV) בעזרת Google Cloud Text-to-Speech."""
-    text = clean_text_for_tts(text)
+    # 1. ניקוי הטקסט המקורי לפני החלפת הלקסיקון (כדי שלא לפגוע בניקוד)
+    cleaned_text = clean_text_for_tts(text)
+    
+    # 2. החלת הלקסיקון וייצור SSML
+    ssml_text = apply_vowelized_lexicon(cleaned_text)
+
     if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
         raise EnvironmentError("Google Cloud credentials not configured for TTS.")
+    
     client = texttospeech.TextToSpeechClient()
-    synthesis_input = texttospeech.SynthesisInput(text=text)
+    
+    # שימוש בשדה SSML במקום TEXT
+    synthesis_input = texttospeech.SynthesisInput(ssml=ssml_text)
+    
     voice = texttospeech.VoiceSelectionParams(language_code="he-IL", name="he-IL-Wavenet-B")
     audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.LINEAR16, sample_rate_hertz=16000, speaking_rate=1.15, pitch=2.0)
+    
+    # הקריאה ל-API נשארת זהה
     response = client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
+    
     output_path = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
     with open(output_path, "wb") as out:
         out.write(response.audio_content)
@@ -184,6 +237,9 @@ def upload_to_yemot(audio_path: str, yemot_full_path: str):
         else:
             logging.error(f"❌ Upload failed: {data}")
             return False
+
+# טוען את הלקסיקון המנוקד בפעם הראשונה
+load_vowelized_lexicon()
 
 
 # ------------------ Routes ------------------
