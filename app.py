@@ -215,7 +215,7 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
             os.remove(tts_path)
 
             if upload_success:
-                playback_command = f"go_to_folder_and_play=/85,dvartorah_{call_id}.wav,0.go_to_folder=/000"
+                playback_command = f"go_to_folder_and_play=/85,dvartorah_{call_id}.wav,0.go_to_folder=/8/6"
                 logging.info(f"Returning IVR command: {playback_command}")
                 return Response(playback_command, mimetype="text/plain")
             else:
