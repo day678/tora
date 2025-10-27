@@ -100,7 +100,15 @@ def recognize_speech(audio_segment: AudioSegment) -> str:
     ממיר אודיו לטקסט בעזרת Google Cloud Speech-to-Text API,
     תוך שימוש ב-Model Adaptation (PhraseSet) לחיזוק זיהוי מונחים תורניים.
     """
-    
+
+    # ⬇️ --- התיקון: טיפול בקצב דגימה --- ⬇️
+    # Google Speech-to-Text מצפה ל-16000 הרץ.
+    # אם הקובץ מגיע מימות בקצב נמוך יותר (כמו 11025), נמיר אותו.
+    if audio_segment.frame_rate != 16000:
+        logging.warning(f"Resampling audio from {audio_segment.frame_rate}Hz to 16000Hz.")
+        audio_segment = audio_segment.set_frame_rate(16000)
+    # ⬆️ --- סוף התיקון --- ⬆️
+
     # 1. יצירת לקוח
     try:
         client = speech.SpeechClient()
@@ -136,6 +144,7 @@ def recognize_speech(audio_segment: AudioSegment) -> str:
     # 4. הגדרת התצורה לבקשה
     config = speech.RecognitionConfig(
         encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+        # כעת הקובץ תמיד יהיה 16000 הרץ, כי טיפלנו בזה למעלה
         sample_rate_hertz=16000, 
         language_code="he-IL",
         model="command_and_search", # מודל מותאם לדיבור ממוקד
@@ -334,11 +343,9 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
     call_id = request.args.get("ApiCallId", str(int(time.time())))
     phone_number = request.args.get("ApiPhone", "unknown")
 
-    # ⬇️ --- התיקון --- ⬇️
-    # הסרת הלוכסן המיותר. מכיוון ש-file_url מתחיל בלוכסן, אין צורך להוסיף עוד אחד.
+    # התיקון הקודם עדיין כאן (הסרת הלוכסן הכפול)
     if not file_url.startswith("http"):
         file_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={SYSTEM_TOKEN}&path=ivr2:{file_url}"
-    # ⬆️ --- סוף התיקון --- ⬆️
 
     logging.info(f"Downloading audio from: {file_url}")
     try:
@@ -349,7 +356,7 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
             temp_input.flush()
             processed_audio = add_silence(temp_input.name)
             
-            # כאן פועלת הפונקציה המתוקנת
+            # כאן פועלת הפונקציה המתוקנת (עם שינוי קצב הדגימה)
             recognized_text = recognize_speech(processed_audio)
             
             if not recognized_text:
