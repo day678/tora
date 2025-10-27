@@ -202,29 +202,38 @@ def upload_to_yemot(audio_path: str, yemot_full_path: str):
 
 # ✅ פונקציה חדשה לווידוא יצירת תיקייה אישית מוגדרת כהשמעת קבצים
 def ensure_personal_folder_exists(phone_number: str):
-    """מוודא שתיקייה אישית קיימת ובעלת הגדרות השמעת קבצים (נוצרת רק בשימוש הראשון)."""
+    """מוודא שתיקייה אישית קיימת ובעלת הגדרות השמעת קבצים."""
     folder_path = f"{BASE_YEMOT_FOLDER}/{phone_number}"
     url_check = "https://www.call2all.co.il/ym/api/GetFiles"
     url_upload = "https://www.call2all.co.il/ym/api/UploadFile"
 
-    # קודם נבדוק אם התיקייה קיימת
+    # בדיקה אם קיימת
     try:
         response = requests.get(url_check, params={"token": SYSTEM_TOKEN, "path": folder_path})
         data = response.json()
         if data.get("responseStatus") == "OK":
             logging.info(f"📁 Personal folder {folder_path} already exists.")
-            return  # לא צריך ליצור שוב
+            return
     except Exception as e:
         logging.warning(f"⚠️ Could not verify if folder exists: {e}")
 
-    # אם לא קיימת - ניצור אותה עם קובץ ext.ini
+    # יצירה עם ext.ini
     ext_ini_content = """type=playfile
 sayfile=yes
 allow_download=yes
+after_play_tfr=tfr_more_options
+control_after_play_moreA1=minus
+control_after_play_moreA2=go_to_folder
+control_after_play_moreA3=restart
+control_after_play_moreA4=add_to_playlist
+playfile_control_play_goto=/8/6/1
+playfile_end_goto=/8/6/11
 """
     files = {"file": ("ext.ini", ext_ini_content.encode("utf-8"), "text/plain")}
     params = {"token": SYSTEM_TOKEN, "path": f"{folder_path}/ext.ini"}
 
+    time.sleep(0.5)  # אם באמת צריך השהייה
+    
     try:
         response = requests.post(url_upload, params=params, files=files)
         data = response.json()
