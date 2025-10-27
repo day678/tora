@@ -125,7 +125,7 @@ def recognize_speech(audio_segment: AudioSegment) -> str:
     # 3. הגדרת התאמת מודל (Model Adaptation)
     adaptation = None
     if STT_PHRASES:
-        # ⬇️ --- התיקון --- ⬇️
+        # ⬇️ --- התיקון לשגיאת 'Parameter to MergeFrom' --- ⬇️
         # המרת רשימת המחרוזות (str) לאובייקטים מסוג (Phrase)
         phrase_objects = [speech.PhraseSet.Phrase(value=phrase) for phrase in STT_PHRASES]
         
@@ -225,7 +225,7 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
         "generationConfig": {"temperature": 0.6, "max_output_tokens": 1300}
     }
 
-    API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent"
+    API_URL = "[https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent](https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent)"
     last_error = None
     for attempt in range(2):
         try:
@@ -263,7 +263,7 @@ def synthesize_with_google_tts(text: str) -> str:
 
 
 def upload_to_yemot(audio_path: str, yemot_full_path: str):
-    url = "https://www.call2all.co.il/ym/api/UploadFile"
+    url = "[https://www.call2all.co.il/ym/api/UploadFile](https://www.call2all.co.il/ym/api/UploadFile)"
     path_no_file = os.path.dirname(yemot_full_path)
     file_name = os.path.basename(yemot_full_path)
     with open(audio_path, "rb") as f:
@@ -283,8 +283,8 @@ def upload_to_yemot(audio_path: str, yemot_full_path: str):
 def ensure_personal_folder_exists(phone_number: str):
     """מוודא שתיקייה אישית קיימת ובעלת הגדרות השמעת קבצים."""
     folder_path = f"{BASE_YEMOT_FOLDER}/{phone_number}"
-    url_check = "https://www.call2all.co.il/ym/api/GetFiles"
-    url_upload = "https://www.call2all.co.il/ym/api/UploadFile"
+    url_check = "[https://www.call2all.co.il/ym/api/GetFiles](https://www.call2all.co.il/ym/api/GetFiles)"
+    url_upload = "[https://www.call2all.co.il/ym/api/UploadFile](https://www.call2all.co.il/ym/api/UploadFile)"
 
     # בדיקה אם קיימת
     try:
@@ -337,7 +337,7 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
     phone_number = request.args.get("ApiPhone", "unknown")
 
     if not file_url.startswith("http"):
-        file_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={SYSTEM_TOKEN}&path=ivr2:/{file_url}"
+        file_url = f"[https://www.call2all.co.il/ym/api/DownloadFile?token=](https://www.call2all.co.il/ym/api/DownloadFile?token=){SYSTEM_TOKEN}&path=ivr2:/{file_url}"
 
     logging.info(f"Downloading audio from: {file_url}")
     try:
@@ -400,4 +400,4 @@ def upload_audio_new():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-```eof
+
