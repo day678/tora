@@ -202,25 +202,38 @@ def upload_to_yemot(audio_path: str, yemot_full_path: str):
 
 # ✅ פונקציה חדשה לווידוא יצירת תיקייה אישית מוגדרת כהשמעת קבצים
 def ensure_personal_folder_exists(phone_number: str):
-    """מוודא שתיקייה אישית קיימת ובעלת הגדרות השמעת קבצים."""
+    """מוודא שתיקייה אישית קיימת ובעלת הגדרות השמעת קבצים (נוצרת רק בשימוש הראשון)."""
     folder_path = f"{BASE_YEMOT_FOLDER}/{phone_number}"
+    url_check = "https://www.call2all.co.il/ym/api/GetFiles"
+    url_upload = "https://www.call2all.co.il/ym/api/UploadFile"
+
+    # קודם נבדוק אם התיקייה קיימת
+    try:
+        response = requests.get(url_check, params={"token": SYSTEM_TOKEN, "path": folder_path})
+        data = response.json()
+        if data.get("responseStatus") == "OK":
+            logging.info(f"📁 Personal folder {folder_path} already exists.")
+            return  # לא צריך ליצור שוב
+    except Exception as e:
+        logging.warning(f"⚠️ Could not verify if folder exists: {e}")
+
+    # אם לא קיימת - ניצור אותה עם קובץ ext.ini
     ext_ini_content = """type=playfile
 sayfile=yes
 allow_download=yes
 """
-
-    url = "https://www.call2all.co.il/ym/api/UploadFile"
-    params = {"token": SYSTEM_TOKEN, "path": f"{folder_path}/ext.ini"}
     files = {"file": ("ext.ini", ext_ini_content.encode("utf-8"), "text/plain")}
+    params = {"token": SYSTEM_TOKEN, "path": f"{folder_path}/ext.ini"}
+
     try:
-        response = requests.post(url, params=params, files=files)
+        response = requests.post(url_upload, params=params, files=files)
         data = response.json()
         if data.get("responseStatus") == "OK":
-            logging.info(f"✅ Folder {folder_path} configured as 'playfile' (ext.ini uploaded).")
+            logging.info(f"✅ Created and configured personal folder {folder_path}.")
         else:
-            logging.warning(f"⚠️ Failed to configure folder {folder_path}: {data}")
+            logging.warning(f"⚠️ Failed to create personal folder {folder_path}: {data}")
     except Exception as e:
-        logging.error(f"❌ Error configuring folder {folder_path}: {e}")
+        logging.error(f"❌ Error creating personal folder {folder_path}: {e}")
 
 
 load_vowelized_lexicon()
