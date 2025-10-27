@@ -281,12 +281,15 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
             final_dvartorah = gemini_result.get("text", recognized_text)
             tts_path = synthesize_with_google_tts(final_dvartorah)
 
-            yemot_full_path = f"{BASE_YEMOT_FOLDER}/dvartorah_{call_id}.wav"
+            # שמירה בתיקייה אישית לפי מספר הטלפון
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            personal_folder = f"{BASE_YEMOT_FOLDER}/{phone_number}"
+            yemot_full_path = f"{personal_folder}/dvartorah_{timestamp}.wav"
             upload_success = upload_to_yemot(tts_path, yemot_full_path)
             os.remove(tts_path)
 
             if upload_success:
-                playback_command = f"go_to_folder_and_play=/85,dvartorah_{call_id}.wav,0.go_to_folder=/8/6"
+                playback_command = f"go_to_folder_and_play=/85/{phone_number},dvartorah_{timestamp}.wav,0.go_to_folder=/8/6"
                 logging.info(f"Returning IVR command: {playback_command}")
                 return Response(playback_command, mimetype="text/plain")
             else:
