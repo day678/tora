@@ -281,7 +281,8 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
             final_dvartorah = gemini_result.get("text", recognized_text)
             tts_path = synthesize_with_google_tts(final_dvartorah)
 
-            yemot_full_path = f"{BASE_YEMOT_FOLDER}/dvartorah_{call_id}.wav"
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            yemot_full_path = f"{BASE_YEMOT_FOLDER}/dvartorah_{call_id}_{timestamp}.wav"
             upload_success = upload_to_yemot(tts_path, yemot_full_path)
             os.remove(tts_path)
 
