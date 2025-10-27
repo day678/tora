@@ -22,10 +22,8 @@ BASE_YEMOT_FOLDER = "ivr2:/85"  # שלוחה ראשית לכל הקבצים
 INSTRUCTIONS_CONTINUE_FILE = "instructions_continue.txt"
 INSTRUCTIONS_NEW_FILE = "instructions_new.txt"
 
-# --- חדש: קובץ לקסיקון מנוקד ---
 VOWELIZED_LEXICON_FILE = "vowelized_lexicon.txt"
 VOWELIZED_LEXICON = {}
-# ------------------------------
 
 # ------------------ Logging ------------------
 logging.basicConfig(
@@ -58,7 +56,6 @@ def load_vowelized_lexicon():
             for line in f:
                 parts = line.strip().split(":")
                 if len(parts) == 2 and parts[0] and parts[1]:
-                    # מפתח: מילה לא מנוקדת, ערך: מילה מנוקדת
                     VOWELIZED_LEXICON[parts[0].strip()] = parts[1].strip()
         logging.info(f"✅ Loaded {len(VOWELIZED_LEXICON)} words into the vowelized lexicon.")
     except FileNotFoundError:
@@ -66,15 +63,14 @@ def load_vowelized_lexicon():
     except Exception as e:
         logging.error(f"❌ Error loading lexicon: {e}")
 
+
 def add_silence(input_path: str) -> AudioSegment:
-    """מוסיף שניית שקט לפני ואחרי קטע האודיו כדי לשפר את הדיוק בזיהוי דיבור."""
     audio = AudioSegment.from_file(input_path, format="wav")
     silence = AudioSegment.silent(duration=1000)
     return silence + audio + silence
 
 
 def recognize_speech(audio_segment: AudioSegment) -> str:
-    """ממיר אודיו לטקסט בעברית בעזרת Google Speech Recognition."""
     recognizer = sr.Recognizer()
     try:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_wav:
@@ -92,7 +88,6 @@ def recognize_speech(audio_segment: AudioSegment) -> str:
 
 
 def load_instructions(file_path: str) -> str:
-    """קורא את קובץ ההנחיות של ג'מיני."""
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             return f.read().strip()
@@ -102,56 +97,40 @@ def load_instructions(file_path: str) -> str:
 
 
 def clean_text_for_tts(text: str) -> str:
-    """מסיר אימוג'ים, סימונים ואותיות לועזיות כדי למנוע הקראת תווים מיותרים."""
     text = re.sub(r'[A-Za-z*#@^_^~\[\]{}()<>+=_|\\\/]', '', text)
     text = re.sub(r'[^\w\s,.!?אבגדהוזחטיכלמנסעפצקרשתםןףךץ]', '', text)
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-def apply_vowelized_lexicon(text: str) -> str:
-    """מחליף מילים לא מנוקדות במילים מנוקדות מהלקסיקון ויוצר SSML."""
-    if not VOWELIZED_LEXICON:
-        # אם הלקסיקון ריק, מחזירים טקסט רגיל עטוף ב-SSML
-        return f'<speak lang="he-IL">{text}</speak>'
 
-    # נשתמש בביטוי רגולרי למציאת מילים כדי לא לפגוע בסימני פיסוק.
-    # המילה המקורית חייבת להיות מילה שלמה.
+def apply_vowelized_lexicon(text: str) -> str:
+    if not VOWELIZED_LEXICON:
+        return f'<speak lang="he-IL">{text}</speak>'
     processed_text = text
     for unvowelized, vowelized in VOWELIZED_LEXICON.items():
-        # יצירת תבנית regex שתחפש את המילה המלאה (unvowelized)
-        # תוך התחשבות ב-Word Boundaries (\b)
         pattern = r'\b' + re.escape(unvowelized) + r'\b'
-        
-        # החלפת כל המופעים של המילה הלא מנוקדת במילה המנוקדת
         processed_text = re.sub(pattern, vowelized, processed_text)
-
-    # עוטפים את התוצאה ב-SSML כדי לאפשר קריאה של הניקוד
     return f'<speak lang="he-IL">{processed_text}</speak>'
 
 
 def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
-    """מסכם דבר תורה עם או בלי זיכרון."""
     if not text_to_summarize or not GEMINI_API_KEY:
         logging.warning("Skipping Gemini summarization: Missing text or API key.")
         return "שגיאה: לא ניתן לנסח דבר תורה."
 
     instruction_text = load_instructions(instruction_file)
-
     os.makedirs("/tmp/conversations", exist_ok=True)
     history_path = f"/tmp/conversations/{phone_number}.json"
     history = {"messages": [], "last_updated": time.time()}
 
-    # אם צריך לזכור את ההיסטוריה
     if remember_history and os.path.exists(history_path):
         try:
             with open(history_path, "r", encoding="utf-8") as f:
                 history = json.load(f)
         except Exception:
             pass
-
         if time.time() - history.get("last_updated", 0) > 1 * 3600:
             history = {"messages": [], "last_updated": time.time()}
-
         history["messages"].append(text_to_summarize)
         history["messages"] = history["messages"][-20:]
         history["last_updated"] = time.time()
@@ -164,16 +143,12 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
 
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.6,
-            "max_output_tokens": 1300  # הגבלת אורך התגובה לשיפור מהירות
-        }
+        "generationConfig": {"temperature": 0.6, "max_output_tokens": 1300}
     }
 
     API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent"
-
     last_error = None
-    for attempt in range(2):  # שני ניסיונות בלבד
+    for attempt in range(2):
         try:
             response = requests.post(f"{API_URL}?key={GEMINI_API_KEY}", json=payload, timeout=35)
             response.raise_for_status()
@@ -188,32 +163,19 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
             logging.error(f"Gemini API error (attempt {attempt+1}): {e}")
             last_error = e
             time.sleep(1)
-
     return text_to_summarize if last_error else "שגיאה לא צפויה."
 
 
 def synthesize_with_google_tts(text: str) -> str:
-    """ממיר טקסט לאודיו (WAV) בעזרת Google Cloud Text-to-Speech."""
-    # 1. ניקוי הטקסט המקורי לפני החלפת הלקסיקון (כדי שלא לפגוע בניקוד)
     cleaned_text = clean_text_for_tts(text)
-    
-    # 2. החלת הלקסיקון וייצור SSML
     ssml_text = apply_vowelized_lexicon(cleaned_text)
-
     if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
         raise EnvironmentError("Google Cloud credentials not configured for TTS.")
-    
     client = texttospeech.TextToSpeechClient()
-    
-    # שימוש בשדה SSML במקום TEXT
     synthesis_input = texttospeech.SynthesisInput(ssml=ssml_text)
-    
     voice = texttospeech.VoiceSelectionParams(language_code="he-IL", name="he-IL-Wavenet-B")
     audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.LINEAR16, sample_rate_hertz=16000, speaking_rate=1.15, pitch=2.0)
-    
-    # הקריאה ל-API נשארת זהה
     response = client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
-    
     output_path = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
     with open(output_path, "wb") as out:
         out.write(response.audio_content)
@@ -222,7 +184,6 @@ def synthesize_with_google_tts(text: str) -> str:
 
 
 def upload_to_yemot(audio_path: str, yemot_full_path: str):
-    """מעלה קובץ לשלוחה בימות המשיח."""
     url = "https://www.call2all.co.il/ym/api/UploadFile"
     path_no_file = os.path.dirname(yemot_full_path)
     file_name = os.path.basename(yemot_full_path)
@@ -238,9 +199,30 @@ def upload_to_yemot(audio_path: str, yemot_full_path: str):
             logging.error(f"❌ Upload failed: {data}")
             return False
 
-# טוען את הלקסיקון המנוקד בפעם הראשונה
-load_vowelized_lexicon()
 
+# ✅ פונקציה חדשה לווידוא יצירת תיקייה אישית מוגדרת כהשמעת קבצים
+def ensure_personal_folder_exists(phone_number: str):
+    """מוודא שתיקייה אישית קיימת ובעלת הגדרות השמעת קבצים."""
+    folder_path = f"{BASE_YEMOT_FOLDER}/{phone_number}"
+    ivr_cfg_content = """type=playfile
+sayfile=yes
+allow_download=yes
+"""
+    url = "https://www.call2all.co.il/ym/api/UploadFile"
+    params = {"token": SYSTEM_TOKEN, "path": f"{folder_path}/ivr.cfg"}
+    files = {"file": ("ivr.cfg", ivr_cfg_content.encode("utf-8"), "text/plain")}
+    try:
+        response = requests.post(url, params=params, files=files)
+        data = response.json()
+        if data.get("responseStatus") == "OK":
+            logging.info(f"✅ Folder {folder_path} is ready for playback.")
+        else:
+            logging.warning(f"⚠️ Failed to set folder {folder_path} as playback: {data}")
+    except Exception as e:
+        logging.error(f"❌ Error setting folder {folder_path}: {e}")
+
+
+load_vowelized_lexicon()
 
 # ------------------ Routes ------------------
 
@@ -250,7 +232,6 @@ def health():
 
 
 def process_audio_request(request, remember_history: bool, instruction_file: str):
-    """פונקציה משותפת לעיבוד האודיו (עם או בלי זיכרון)."""
     file_url = request.args.get("file_url")
     call_id = request.args.get("ApiCallId", str(int(time.time())))
     phone_number = request.args.get("ApiPhone", "unknown")
@@ -270,21 +251,23 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
             if not recognized_text:
                 return Response("לא זוהה דיבור ברור. אנא נסה שוב.", mimetype="text/plain")
 
-            # נריץ את Gemini ברקע (thread)
             gemini_result = {}
             def run_gemini():
                 gemini_result["text"] = summarize_with_gemini(recognized_text, phone_number, instruction_file, remember_history)
             gemini_thread = threading.Thread(target=run_gemini)
             gemini_thread.start()
-            gemini_thread.join()  # ממתין רק עד סיום תהליך Gemini
+            gemini_thread.join()
 
             final_dvartorah = gemini_result.get("text", recognized_text)
             tts_path = synthesize_with_google_tts(final_dvartorah)
 
-            # שמירה בתיקייה אישית לפי מספר הטלפון
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             personal_folder = f"{BASE_YEMOT_FOLDER}/{phone_number}"
             yemot_full_path = f"{personal_folder}/dvartorah_{timestamp}.wav"
+
+            # 🟩 קריאה לפונקציה שמוודאת שהתיקייה האישית קיימת ומוגדרת להשמעת קבצים
+            ensure_personal_folder_exists(phone_number)
+
             upload_success = upload_to_yemot(tts_path, yemot_full_path)
             os.remove(tts_path)
 
@@ -301,13 +284,11 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
 
 @app.route("/upload_audio_continue", methods=["GET"])
 def upload_audio_continue():
-    """פונקציה שממשיכה שיחה קודמת (שומרת זיכרון)."""
     return process_audio_request(request, remember_history=True, instruction_file=INSTRUCTIONS_CONTINUE_FILE)
 
 
 @app.route("/upload_audio_new", methods=["GET"])
 def upload_audio_new():
-    """פונקציה שמתחילה נושא חדש (ללא זיכרון)."""
     return process_audio_request(request, remember_history=False, instruction_file=INSTRUCTIONS_NEW_FILE)
 
 
