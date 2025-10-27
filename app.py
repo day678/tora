@@ -93,7 +93,7 @@ def add_silence(input_path: str) -> AudioSegment:
 
 
 # ----------------------------------------------------
-# ⬇️ החלפה מלאה של פונקציית התמלול (recognize_speech) ⬇️
+# ⬇️ פונקציית התמלול המתוקנת ⬇️
 # ----------------------------------------------------
 def recognize_speech(audio_segment: AudioSegment) -> str:
     """
@@ -125,8 +125,14 @@ def recognize_speech(audio_segment: AudioSegment) -> str:
     # 3. הגדרת התאמת מודל (Model Adaptation)
     adaptation = None
     if STT_PHRASES:
-        # יצירת PhraseSet עם חיזוק (Boost) גבוה
-        phrase_set = speech.PhraseSet(phrases=STT_PHRASES, boost=15.0) 
+        # ⬇️ --- התיקון --- ⬇️
+        # המרת רשימת המחרוזות (str) לאובייקטים מסוג (Phrase)
+        phrase_objects = [speech.PhraseSet.Phrase(value=phrase) for phrase in STT_PHRASES]
+        
+        # יצירת PhraseSet עם רשימת האובייקטים המתוקנת
+        phrase_set = speech.PhraseSet(phrases=phrase_objects, boost=15.0) 
+        # ⬆️ --- סוף התיקון --- ⬆️
+        
         adaptation = speech.SpeechAdaptation(phrase_sets=[phrase_set])
 
     # 4. הגדרת התצורה לבקשה
@@ -152,10 +158,11 @@ def recognize_speech(audio_segment: AudioSegment) -> str:
         return ""
     
     except Exception as e:
+        # כאן השגיאה שראית בלוג תירשם
         logging.error(f"❌ Speech recognition API error: {e}")
         return ""
 # ----------------------------------------------------
-# ⬆️ סוף הפונקציה המוחלפת ⬆️
+# ⬆️ סוף הפונקציה המתוקנת ⬆️
 # ----------------------------------------------------
 
 
@@ -341,7 +348,7 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
             temp_input.flush()
             processed_audio = add_silence(temp_input.name)
             
-            # כאן פועלת הפונקציה החדשה והמשופרת
+            # כאן פועלת הפונקציה המתוקנת
             recognized_text = recognize_speech(processed_audio)
             
             if not recognized_text:
@@ -375,6 +382,7 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
                 return Response("שגיאה בהעלאת הקובץ לשרת.", mimetype="text/plain")
     except Exception as e:
         logging.error(f"Critical error: {e}")
+        # החזרת השגיאה גם לימות המשיח כדי שתדע שיש בעיה
         return Response(f"שגיאה קריטית בעיבוד: {e}", mimetype="text/plain")
 
 
@@ -392,4 +400,4 @@ def upload_audio_new():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
+```eof
