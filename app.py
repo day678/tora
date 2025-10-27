@@ -6,12 +6,12 @@ import logging
 import time
 import requests
 import threading
-import time
 import re
 from flask import Flask, request, Response
 from pydub import AudioSegment
-import speech_recognition as sr
-from google.cloud import texttospeech
+# הוספת ייבוא של ספריית ה-Speech הראשית של גוגל
+from google.cloud import texttospeech, speech
+# הסרת הייבוא של speech_recognition as sr
 
 # ------------------ Configuration ------------------
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -25,6 +25,10 @@ INSTRUCTIONS_NEW_FILE = "instructions_new.txt"
 
 VOWELIZED_LEXICON_FILE = "vowelized_lexicon.txt"
 VOWELIZED_LEXICON = {}
+
+# הוספת הגדרות לקובץ הביטויים (STT)
+STT_PHRASES_FILE = "stt_phrases.txt"
+STT_PHRASES = []
 
 # ------------------ Logging ------------------
 logging.basicConfig(
@@ -44,7 +48,7 @@ if GOOGLE_CREDENTIALS_B64:
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_cred_path
     logging.info("✅ Google Cloud credentials loaded successfully.")
 else:
-    logging.warning("⚠️ GOOGLE_APPLICATION_CREDENTIALS_B64 not found. TTS will fail.")
+    logging.warning("⚠️ GOOGLE_APPLICATION_CREDENTIALS_B64 not found. TTS/STT will fail.")
 
 
 # ------------------ Helper Functions ------------------
@@ -64,6 +68,23 @@ def load_vowelized_lexicon():
     except Exception as e:
         logging.error(f"❌ Error loading lexicon: {e}")
 
+# פונקציה חדשה לטעינת ביטויי התמלול
+def load_stt_phrases():
+    """טוען את רשימת הביטויים לשיפור התמלול (עבור STT)."""
+    global STT_PHRASES
+    try:
+        with open(STT_PHRASES_FILE, "r", encoding="utf-8") as f:
+            STT_PHRASES = [line.strip() for line in f if line.strip()]
+        logging.info(f"✅ Loaded {len(STT_PHRASES)} phrases for STT adaptation.")
+    except FileNotFoundError:
+        logging.warning(f"⚠️ STT Phrases file {STT_PHRASES_FILE} not found. Running STT without custom phrases.")
+    except Exception as e:
+        logging.error(f"❌ Error loading STT phrases: {e}")
+
+# טעינת הלקסיקונים בעת עליית השרת
+load_vowelized_lexicon()
+load_stt_phrases()
+
 
 def add_silence(input_path: str) -> AudioSegment:
     audio = AudioSegment.from_file(input_path, format="wav")
@@ -71,21 +92,71 @@ def add_silence(input_path: str) -> AudioSegment:
     return silence + audio + silence
 
 
+# ----------------------------------------------------
+# ⬇️ החלפה מלאה של פונקציית התמלול (recognize_speech) ⬇️
+# ----------------------------------------------------
 def recognize_speech(audio_segment: AudioSegment) -> str:
-    recognizer = sr.Recognizer()
+    """
+    ממיר אודיו לטקסט בעזרת Google Cloud Speech-to-Text API,
+    תוך שימוש ב-Model Adaptation (PhraseSet) לחיזוק זיהוי מונחים תורניים.
+    """
+    
+    # 1. יצירת לקוח
     try:
+        client = speech.SpeechClient()
+    except Exception as e:
+        logging.error(f"❌ Failed to initialize SpeechClient: {e}")
+        return ""
+
+    # 2. הכנת נתוני האודיו
+    try:
+        # שמירה זמנית של האודיו כ-WAV כדי לקבל את ה-bytes בפורמט הנכון.
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_wav:
             audio_segment.export(temp_wav.name, format="wav")
-            with sr.AudioFile(temp_wav.name) as source:
-                data = recognizer.record(source)
-            text = recognizer.recognize_google(data, language="he-IL")
-            logging.info(f"Recognized text: {text}")
-            return text
-    except sr.UnknownValueError:
-        return ""
+            # קריאת התוכן של הקובץ הזמני
+            with open(temp_wav.name, "rb") as f:
+                 audio_bytes = f.read()
+
+        audio_content = speech.RecognitionAudio(content=audio_bytes)
     except Exception as e:
-        logging.error(f"Speech recognition error: {e}")
+        logging.error(f"❌ Error preparing audio content: {e}")
         return ""
+
+    # 3. הגדרת התאמת מודל (Model Adaptation)
+    adaptation = None
+    if STT_PHRASES:
+        # יצירת PhraseSet עם חיזוק (Boost) גבוה
+        phrase_set = speech.PhraseSet(phrases=STT_PHRASES, boost=15.0) 
+        adaptation = speech.SpeechAdaptation(phrase_sets=[phrase_set])
+
+    # 4. הגדרת התצורה לבקשה
+    config = speech.RecognitionConfig(
+        encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+        sample_rate_hertz=16000, 
+        language_code="he-IL",
+        model="command_and_search", # מודל מותאם לדיבור ממוקד
+        adaptation=adaptation if adaptation else None 
+    )
+
+    # 5. שליחת הבקשה
+    try:
+        response = client.recognize(config=config, audio=audio_content)
+        
+        # 6. עיבוד התוצאה
+        if response.results and response.results[0].alternatives:
+            text = response.results[0].alternatives[0].transcript
+            logging.info(f"✅ Recognized text (STT): {text}")
+            return text
+        
+        logging.info("⚠️ No clear speech recognized (STT).")
+        return ""
+    
+    except Exception as e:
+        logging.error(f"❌ Speech recognition API error: {e}")
+        return ""
+# ----------------------------------------------------
+# ⬆️ סוף הפונקציה המוחלפת ⬆️
+# ----------------------------------------------------
 
 
 def load_instructions(file_path: str) -> str:
@@ -130,7 +201,7 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
                 history = json.load(f)
         except Exception:
             pass
-        if time.time() - history.get("last_updated", 0) > 1 * 3600:
+        if time.time() - history.get("last_updated", 0) > 1 * 3600: # נשאר עם שעה אחת, כפי שבקוד שלך
             history = {"messages": [], "last_updated": time.time()}
         history["messages"].append(text_to_summarize)
         history["messages"] = history["messages"][-20:]
@@ -246,8 +317,6 @@ playfile_end_goto=/8/6/11
         logging.error(f"❌ Error creating personal folder {folder_path}: {e}")
 
 
-load_vowelized_lexicon()
-
 # ------------------ Routes ------------------
 
 @app.route("/health", methods=["GET"])
@@ -271,7 +340,10 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
             temp_input.write(response.content)
             temp_input.flush()
             processed_audio = add_silence(temp_input.name)
+            
+            # כאן פועלת הפונקציה החדשה והמשופרת
             recognized_text = recognize_speech(processed_audio)
+            
             if not recognized_text:
                 return Response("לא זוהה דיבור ברור. אנא נסה שוב.", mimetype="text/plain")
 
@@ -320,3 +392,4 @@ def upload_audio_new():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
