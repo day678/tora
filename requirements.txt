@@ -4,3 +4,4 @@ pydub==0.25.1
 SpeechRecognition==3.10.4
 google-cloud-texttospeech==2.16.3
 gunicorn==21.2.0
+/google-cloud-speech
