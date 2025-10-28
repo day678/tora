@@ -87,7 +87,7 @@ def recognize_speech(audio_segment: AudioSegment) -> str:
             client = OpenAI(api_key=OPENAI_API_KEY)
             with open(temp_wav.name, "rb") as f:
                 transcript = client.audio.transcriptions.create(
-                    model="whisper-large-v3",
+                    model="whisper-1",
                     file=f,
                     language="he"
                 )
