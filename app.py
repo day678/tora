@@ -114,14 +114,15 @@ def apply_vowelized_lexicon(text: str) -> str:
     return f'<speak lang="he-IL">{processed_text}</speak>'
 
 
-def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
+def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction_file: str, remember_history: bool, call_id: str) -> str:
+    """היסטוריה לפי מזהה שיחה בלבד — נמחקת לאחר סיום."""
     if not text_to_summarize or not GEMINI_API_KEY:
         logging.warning("Skipping Gemini summarization: Missing text or API key.")
         return "שגיאה: לא ניתן לנסח דבר תורה."
 
     instruction_text = load_instructions(instruction_file)
     os.makedirs("/tmp/conversations", exist_ok=True)
-    history_path = f"/tmp/conversations/{phone_number}.json"
+    history_path = f"/tmp/conversations/{phone_number}_{call_id}.json"
     history = {"messages": [], "last_updated": time.time()}
 
     if remember_history and os.path.exists(history_path):
@@ -130,8 +131,7 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
                 history = json.load(f)
         except Exception:
             pass
-        if time.time() - history.get("last_updated", 0) > 1 * 3600:
-            history = {"messages": [], "last_updated": time.time()}
+
         history["messages"].append(text_to_summarize)
         history["messages"] = history["messages"][-20:]
         history["last_updated"] = time.time()
@@ -201,24 +201,21 @@ def upload_to_yemot(audio_path: str, yemot_full_path: str):
             return False
 
 
-# ✅ פונקציה חדשה לווידוא יצירת תיקייה אישית מוגדרת כהשמעת קבצים
 def ensure_personal_folder_exists(phone_number: str):
     """מוודא שתיקייה אישית קיימת ובעלת הגדרות השמעת קבצים."""
     folder_path = f"{BASE_YEMOT_FOLDER}/{phone_number}"
     url_check = "https://www.call2all.co.il/ym/api/GetFiles"
     url_upload = "https://www.call2all.co.il/ym/api/UploadFile"
 
-    # בדיקה אם קיימת
     try:
         response = requests.get(url_check, params={"token": SYSTEM_TOKEN, "path": folder_path})
         data = response.json()
-        if data.get("responseStatus") == "OK":
+        if data.get("responseStatus") == "OK" and data.get("files"):
             logging.info(f"📁 Personal folder {folder_path} already exists.")
             return
     except Exception as e:
         logging.warning(f"⚠️ Could not verify if folder exists: {e}")
 
-    # יצירה עם ext.ini
     ext_ini_content = """type=playfile
 sayfile=yes
 allow_download=yes
@@ -233,8 +230,7 @@ playfile_end_goto=/8/6/11
     files = {"file": ("ext.ini", ext_ini_content.encode("utf-8"), "text/plain")}
     params = {"token": SYSTEM_TOKEN, "path": f"{folder_path}/ext.ini"}
 
-    time.sleep(0.5)  # אם באמת צריך השהייה
-    
+    time.sleep(0.5)
     try:
         response = requests.post(url_upload, params=params, files=files)
         data = response.json()
@@ -247,8 +243,6 @@ playfile_end_goto=/8/6/11
 
 
 load_vowelized_lexicon()
-
-# ------------------ Routes ------------------
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -277,7 +271,7 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
 
             gemini_result = {}
             def run_gemini():
-                gemini_result["text"] = summarize_with_gemini(recognized_text, phone_number, instruction_file, remember_history)
+                gemini_result["text"] = summarize_with_gemini(recognized_text, phone_number, instruction_file, remember_history, call_id)
             gemini_thread = threading.Thread(target=run_gemini)
             gemini_thread.start()
             gemini_thread.join()
@@ -289,7 +283,6 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
             personal_folder = f"{BASE_YEMOT_FOLDER}/{phone_number}"
             yemot_full_path = f"{personal_folder}/dvartorah_{timestamp}.wav"
 
-            # 🟩 קריאה לפונקציה שמוודאת שהתיקייה האישית קיימת ומוגדרת להשמעת קבצים
             ensure_personal_folder_exists(phone_number)
 
             upload_success = upload_to_yemot(tts_path, yemot_full_path)
@@ -316,7 +309,6 @@ def upload_audio_new():
     return process_audio_request(request, remember_history=False, instruction_file=INSTRUCTIONS_NEW_FILE)
 
 
-# ------------------ Run ------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
