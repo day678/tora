@@ -17,7 +17,7 @@ from google.cloud import texttospeech
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_CREDENTIALS_B64 = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_B64")
 
-SYSTEM_TOKEN = "0733181406:80809090"
+SYSTEM_TOKEN = "0733183465:808090"
 BASE_YEMOT_FOLDER = "ivr2:/85"  # שלוחה ראשית לכל הקבצים
 
 INSTRUCTIONS_CONTINUE_FILE = "instructions_continue.txt"
