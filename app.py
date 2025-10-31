@@ -119,7 +119,12 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
     if not text_to_summarize or not GEMINI_API_KEY:
         logging.warning("Skipping Gemini summarization: Missing text or API key.")
         return "שגיאה: לא ניתן לנסח דבר תורה."
-
+    # מחיקה אוטומטית של ההיסטוריה אחרי שעה
+    for f in os.listdir("/tmp/conversations"):
+        fpath = os.path.join("/tmp/conversations", f)
+        if time.time() - os.path.getmtime(fpath) > 3600:
+            os.remove(fpath)
+            
     instruction_text = load_instructions(instruction_file)
     os.makedirs("/tmp/conversations", exist_ok=True)
     history_path = f"/tmp/conversations/{phone_number}_{call_id}.json"
@@ -251,7 +256,7 @@ def health():
 
 def process_audio_request(request, remember_history: bool, instruction_file: str):
     file_url = request.args.get("file_url")
-    call_id = request.args.get("ApiCallId", str(int(time.time())))
+    call_id = request.args.get("ApiYFCallId") or request.args.get("ApiCallId", str(int(time.time())))
     phone_number = request.args.get("ApiPhone", "unknown")
 
     if not file_url.startswith("http"):
