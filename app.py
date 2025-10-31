@@ -119,13 +119,8 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
     if not text_to_summarize or not GEMINI_API_KEY:
         logging.warning("Skipping Gemini summarization: Missing text or API key.")
         return "שגיאה: לא ניתן לנסח דבר תורה."
-    # מחיקה אוטומטית של ההיסטוריה אחרי שעה
+    
     os.makedirs("/tmp/conversations", exist_ok=True)
-    for f in os.listdir("/tmp/conversations"):
-        fpath = os.path.join("/tmp/conversations", f)
-        if time.time() - os.path.getmtime(fpath) > 3600:
-            os.remove(fpath)
-            
     instruction_text = load_instructions(instruction_file)
     history_path = f"/tmp/conversations/{phone_number}_{call_id}.json"
     history = {"messages": [], "last_updated": time.time()}
@@ -141,9 +136,11 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
         history["messages"] = history["messages"][-20:]
         history["last_updated"] = time.time()
         context_text = "\n---\n".join(history["messages"])
+        logging.info(f"📜 Loaded {len(history['messages'])} previous messages for {phone_number}_{call_id}")
     else:
         history = {"messages": [text_to_summarize], "last_updated": time.time()}
         context_text = text_to_summarize
+        logging.info(f"🆕 Starting new conversation history for {phone_number}_{call_id}")
 
     prompt = f"{instruction_text}\n\nדברי התורה שנאמרו:\n{context_text}"
 
@@ -164,6 +161,11 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
                 with open(history_path, "w", encoding="utf-8") as f:
                     json.dump(history, f, ensure_ascii=False, indent=2)
             if result:
+                # ✅ מחיקת היסטוריה ישנה רק אחרי ששמרנו את הנוכחית
+                for f in os.listdir("/tmp/conversations"):
+                    fpath = os.path.join("/tmp/conversations", f)
+                    if time.time() - os.path.getmtime(fpath) > 3600:
+                        os.remove(fpath)
                 return result
         except Exception as e:
             logging.error(f"Gemini API error (attempt {attempt+1}): {e}")
@@ -229,8 +231,8 @@ control_after_play_moreA1=minus
 control_after_play_moreA2=go_to_folder
 control_after_play_moreA3=restart
 control_after_play_moreA4=add_to_playlist
-playfile_control_play_goto=/8/6/1
-playfile_end_goto=/8/6/11
+playfile_control_play_goto=/1
+playfile_end_goto=/11
 """
     files = {"file": ("ext.ini", ext_ini_content.encode("utf-8"), "text/plain")}
     params = {"token": SYSTEM_TOKEN, "path": f"{folder_path}/ext.ini"}
