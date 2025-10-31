@@ -120,13 +120,13 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
         logging.warning("Skipping Gemini summarization: Missing text or API key.")
         return "שגיאה: לא ניתן לנסח דבר תורה."
     # מחיקה אוטומטית של ההיסטוריה אחרי שעה
+    os.makedirs("/tmp/conversations", exist_ok=True)
     for f in os.listdir("/tmp/conversations"):
         fpath = os.path.join("/tmp/conversations", f)
         if time.time() - os.path.getmtime(fpath) > 3600:
             os.remove(fpath)
             
     instruction_text = load_instructions(instruction_file)
-    os.makedirs("/tmp/conversations", exist_ok=True)
     history_path = f"/tmp/conversations/{phone_number}_{call_id}.json"
     history = {"messages": [], "last_updated": time.time()}
 
