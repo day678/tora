@@ -17,7 +17,7 @@ from google.cloud import texttospeech
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_CREDENTIALS_B64 = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_B64")
 
-SYSTEM_TOKEN = "0733181406:80809090"
+SYSTEM_TOKEN = "0733183465:808090"
 BASE_YEMOT_FOLDER = "ivr2:/85"  # שלוחה ראשית לכל הקבצים
 
 INSTRUCTIONS_CONTINUE_FILE = "instructions_continue.txt"
@@ -227,8 +227,8 @@ control_after_play_moreA1=minus
 control_after_play_moreA2=go_to_folder
 control_after_play_moreA3=restart
 control_after_play_moreA4=add_to_playlist
-playfile_control_play_goto=/8/6/1
-playfile_end_goto=/8/6/11
+playfile_control_play_goto=/1
+playfile_end_goto=/11
 """
     files = {"file": ("ext.ini", ext_ini_content.encode("utf-8"), "text/plain")}
     params = {"token": SYSTEM_TOKEN, "path": f"{folder_path}/ext.ini"}
