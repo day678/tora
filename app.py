@@ -166,7 +166,7 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
 
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.6, "max_output_tokens": 1300}
+        "generationConfig": {"temperature": 0.6, "max_output_tokens": 2900}
     }
 
     API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent"
