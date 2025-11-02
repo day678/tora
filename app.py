@@ -255,6 +255,45 @@ def health():
     return Response("OK", status=200, mimetype="text/plain")
 
 
+# 🟩 --- TIKUN 2: פונקציית עזר לריצה ברקע ---
+def _process_in_background(recognized_text, phone_number, instruction_file, remember_history):
+    """
+    This function runs in a background thread to avoid blocking the web request.
+    It handles Gemini, TTS, and Yemot upload.
+    """
+    tts_path = None # נגדיר מראש למקרה של שגיאה לפני יצירת הקובץ
+    try:
+        logging.info(f"[{phone_number}] Starting background processing...")
+        final_dvartorah = summarize_with_gemini(recognized_text, phone_number, instruction_file, remember_history)
+        
+        logging.info(f"[{phone_number}] Synthesizing TTS...")
+        tts_path = synthesize_with_google_tts(final_dvartorah)
+
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        personal_folder = f"{BASE_YEMOT_FOLDER}/{phone_number}"
+        yemot_full_path = f"{personal_folder}/dvartorah_{timestamp}.wav"
+
+        logging.info(f"[{phone_number}] Ensuring personal folder exists...")
+        ensure_personal_folder_exists(phone_number)
+
+        logging.info(f"[{phone_number}] Uploading to Yemot: {yemot_full_path}")
+        upload_success = upload_to_yemot(tts_path, yemot_full_path)
+        
+        if upload_success:
+            logging.info(f"[{phone_number}] Background processing SUCCESS.")
+        else:
+            logging.warning(f"[{phone_number}] Background processing FAILED (upload failed).")
+            
+    except Exception as e:
+        logging.error(f"[{phone_number}] CRITICAL background processing error: {e}")
+    finally:
+        # נוודא שהקובץ הזמני נמחק, גם אם הייתה שגיאה
+        if tts_path and os.path.exists(tts_path):
+            os.remove(tts_path)
+            logging.info(f"[{phone_number}] Cleaned up temp TTS file: {tts_path}")
+# ---------------------------------------------
+
+
 def process_audio_request(request, remember_history: bool, instruction_file: str):
     file_url = request.args.get("file_url")
     call_id = request.args.get("ApiCallId", str(int(time.time())))
@@ -263,46 +302,46 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
     if not file_url.startswith("http"):
         file_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={SYSTEM_TOKEN}&path=ivr2:/{file_url}"
 
-    logging.info(f"Downloading audio from: {file_url}")
+    logging.info(f"[{phone_number} | {call_id}] Downloading audio from: {file_url}")
     try:
         response = requests.get(file_url, timeout=20)
         response.raise_for_status()
+        
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_input:
-            temp_input.write(response.content)
+            
+            # 🟩 --- TIKUN 1: Memory Fix (Streaming Download) ---
+            logging.info(f"[{phone_number} | {call_id}] Starting file download stream...")
+            for chunk in response.iter_content(chunk_size=8192):
+                temp_input.write(chunk)
+            logging.info(f"[{phone_number} | {call_id}] File download complete.")
+            # --------------------------------------------------
+            
             temp_input.flush()
+            
+            logging.info(f"[{phone_number} | {call_id}] Processing silence and STT...")
             processed_audio = add_silence(temp_input.name)
             recognized_text = recognize_speech(processed_audio)
+            
             if not recognized_text:
+                logging.warning(f"[{phone_number} | {call_id}] No speech recognized.")
                 return Response("לא זוהה דיבור ברור. אנא נסה שוב.", mimetype="text/plain")
 
-            gemini_result = {}
-            def run_gemini():
-                gemini_result["text"] = summarize_with_gemini(recognized_text, phone_number, instruction_file, remember_history)
-            gemini_thread = threading.Thread(target=run_gemini)
-            gemini_thread.start()
-            gemini_thread.join()
+            # 🟩 --- TIKUN 2: Timeout Fix (Background Processing) ---
+            logging.info(f"[{phone_number} | {call_id}] Handing off to background thread...")
+            # נריץ את התהליך הכבד ברקע ונחזיר תשובה מיידית
+            background_args = (recognized_text, phone_number, instruction_file, remember_history)
+            threading.Thread(target=_process_in_background, args=background_args).start()
+            
+            # נחזיר תגובה מיידית למערכת הטלפונית
+            wait_message = "t-הבקשה התקבלה.t-הסיכום ימתין לכם בתיקייה האישית בעוד כדקה.t-כעת מועברים לתפריט."
+            playback_command = f"read={wait_message},go_to_folder=/8/6"
+            
+            logging.info(f"[{phone_number} | {call_id}] Returning immediate IVR command: {playback_command}")
+            return Response(playback_command, mimetype="text/plain")
+            # ----------------------------------------------------
 
-            final_dvartorah = gemini_result.get("text", recognized_text)
-            tts_path = synthesize_with_google_tts(final_dvartorah)
-
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            personal_folder = f"{BASE_YEMOT_FOLDER}/{phone_number}"
-            yemot_full_path = f"{personal_folder}/dvartorah_{timestamp}.wav"
-
-            # 🟩 קריאה לפונקציה שמוודאת שהתיקייה האישית קיימת ומוגדרת להשמעת קבצים
-            ensure_personal_folder_exists(phone_number)
-
-            upload_success = upload_to_yemot(tts_path, yemot_full_path)
-            os.remove(tts_path)
-
-            if upload_success:
-                playback_command = f"go_to_folder_and_play=/85/{phone_number},dvartorah_{timestamp}.wav,0.go_to_folder=/8/6"
-                logging.info(f"Returning IVR command: {playback_command}")
-                return Response(playback_command, mimetype="text/plain")
-            else:
-                return Response("שגיאה בהעלאת הקובץ לשרת.", mimetype="text/plain")
     except Exception as e:
-        logging.error(f"Critical error: {e}")
+        logging.error(f"[{phone_number} | {call_id}] Critical error in *main* request: {e}")
         return Response(f"שגיאה קריטית בעיבוד: {e}", mimetype="text/plain")
 
 
