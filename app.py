@@ -12,6 +12,11 @@ from flask import Flask, request, Response
 from pydub import AudioSegment
 import speech_recognition as sr
 from google.cloud import texttospeech
+# --- הוספת ספריות מייל ---
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.header import Header
 
 # ------------------ Configuration ------------------
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -26,7 +31,16 @@ INSTRUCTIONS_NEW_FILE = "instructions_new.txt"
 VOWELIZED_LEXICON_FILE = "vowelized_lexicon.txt"
 VOWELIZED_LEXICON = {}
 
+# --- הגדרות חדשות לשליחת מייל ---
+EMAIL_HOST = os.getenv("EMAIL_HOST") # שרת ה-SMTP שלכם
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", 587)) # הפורט (587 עבור TLS)
+EMAIL_USER = os.getenv("EMAIL_USER") # שם המשתמש לשליחת מייל
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD") # סיסמת המייל
+DEFAULT_EMAIL_RECEIVER = os.getenv("DEFAULT_EMAIL_RECEIVER") # כתובת גיבוי אם לא סופק ApiEmail
+EMAIL_SENDER_NAME = "מערכת סיכום שיחות" # השם שיופיע כשולח
+
 # ------------------ Logging ------------------
+# ... קיים קוד ...
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -36,6 +50,7 @@ logging.basicConfig(
 app = Flask(__name__)
 
 # יצירת קובץ זמני למפתח של Google Cloud
+# ... קיים קוד ...
 if GOOGLE_CREDENTIALS_B64:
     creds_json = base64.b64decode(GOOGLE_CREDENTIALS_B64).decode("utf-8")
     temp_cred_path = "/tmp/google_creds.json"
@@ -50,6 +65,7 @@ else:
 # ------------------ Helper Functions ------------------
 
 def load_vowelized_lexicon():
+# ... קיים קוד ...
     """טוען את קובץ המילים המנוקדות לזיכרון."""
     global VOWELIZED_LEXICON
     try:
@@ -66,12 +82,14 @@ def load_vowelized_lexicon():
 
 
 def add_silence(input_path: str) -> AudioSegment:
+# ... קיים קוד ...
     audio = AudioSegment.from_file(input_path, format="wav")
     silence = AudioSegment.silent(duration=1000)
     return silence + audio + silence
 
 
 def recognize_speech(audio_segment: AudioSegment) -> str:
+# ... קיים קוד ...
     recognizer = sr.Recognizer()
     try:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_wav:
@@ -89,6 +107,7 @@ def recognize_speech(audio_segment: AudioSegment) -> str:
 
 
 def load_instructions(file_path: str) -> str:
+# ... קיים קוד ...
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             return f.read().strip()
@@ -98,6 +117,7 @@ def load_instructions(file_path: str) -> str:
 
 
 def clean_text_for_tts(text: str) -> str:
+# ... קיים קוד ...
     text = re.sub(r'[A-Za-z*#@^_^~\[\]{}()<>+=_|\\\/]', '', text)
     text = re.sub(r'[^\w\s,.!?אבגדהוזחטיכלמנסעפצקרשתםןףךץ]', '', text)
     text = re.sub(r'\s+', ' ', text)
@@ -105,6 +125,7 @@ def clean_text_for_tts(text: str) -> str:
 
 
 def apply_vowelized_lexicon(text: str) -> str:
+# ... קיים קוד ...
     if not VOWELIZED_LEXICON:
         return f'<speak lang="he-IL">{text}</speak>'
     processed_text = text
@@ -115,6 +136,7 @@ def apply_vowelized_lexicon(text: str) -> str:
 
 
 def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
+# ... קיים קוד ...
     if not text_to_summarize or not GEMINI_API_KEY:
         logging.warning("Skipping Gemini summarization: Missing text or API key.")
         return "שגיאה: לא ניתן לנסח דבר תורה."
@@ -168,6 +190,7 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
 
 
 def synthesize_with_google_tts(text: str) -> str:
+# ... קיים קוד ...
     cleaned_text = clean_text_for_tts(text)
     ssml_text = apply_vowelized_lexicon(cleaned_text)
     if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
@@ -185,6 +208,7 @@ def synthesize_with_google_tts(text: str) -> str:
 
 
 def upload_to_yemot(audio_path: str, yemot_full_path: str):
+# ... קיים קוד ...
     url = "https://www.call2all.co.il/ym/api/UploadFile"
     path_no_file = os.path.dirname(yemot_full_path)
     file_name = os.path.basename(yemot_full_path)
@@ -203,6 +227,7 @@ def upload_to_yemot(audio_path: str, yemot_full_path: str):
 
 # ✅ פונקציה חדשה לווידוא יצירת תיקייה אישית מוגדרת כהשמעת קבצים
 def ensure_personal_folder_exists(phone_number: str):
+# ... קיים קוד ...
     """מוודא שתיקייה אישית קיימת ובעלת הגדרות השמעת קבצים."""
     folder_path = f"{BASE_YEMOT_FOLDER}/{phone_number}"
     url_check = "https://www.call2all.co.il/ym/api/GetFiles"
@@ -246,16 +271,47 @@ playfile_end_goto=/11
         logging.error(f"❌ Error creating personal folder {folder_path}: {e}")
 
 
+# --- פונקציית עזר חדשה לשליחת מייל ---
+def send_email(to_address: str, subject: str, body: str) -> bool:
+    """שולח מייל עם התוכן הנתון."""
+    if not all([EMAIL_HOST, EMAIL_PORT, EMAIL_USER, EMAIL_PASSWORD, to_address]):
+        logging.error("❌ Email configuration is missing. Cannot send email.")
+        return False
+
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = f'"{Header(EMAIL_SENDER_NAME, "utf-8").encode()}" <{EMAIL_USER}>'
+        msg['To'] = to_address
+        msg['Subject'] = Header(subject, 'utf-8').encode()
+        
+        # גוף המייל עם קידוד UTF-8
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+        
+        server = smtplib.SMTP(EMAIL_HOST, EMAIL_PORT)
+        server.starttls()  # הפעלת הצפנת TLS
+        server.login(EMAIL_USER, EMAIL_PASSWORD)
+        text = msg.as_string()
+        server.sendmail(EMAIL_USER, to_address, text)
+        server.quit()
+        logging.info(f"✅ Email sent successfully to {to_address}")
+        return True
+    except Exception as e:
+        logging.error(f"❌ Failed to send email: {e}")
+        return False
+
+
 load_vowelized_lexicon()
 
 # ------------------ Routes ------------------
 
 @app.route("/health", methods=["GET"])
 def health():
+# ... קיים קוד ...
     return Response("OK", status=200, mimetype="text/plain")
 
 
 def process_audio_request(request, remember_history: bool, instruction_file: str):
+# ... קיים קוד ...
     file_url = request.args.get("file_url")
     call_id = request.args.get("ApiCallId", str(int(time.time())))
     phone_number = request.args.get("ApiPhone", "unknown")
@@ -325,15 +381,109 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
 
 @app.route("/upload_audio_continue", methods=["GET"])
 def upload_audio_continue():
+# ... קיים קוד ...
     return process_audio_request(request, remember_history=True, instruction_file=INSTRUCTIONS_CONTINUE_FILE)
 
 
 @app.route("/upload_audio_new", methods=["GET"])
 def upload_audio_new():
+# ... קיים קוד ...
     return process_audio_request(request, remember_history=False, instruction_file=INSTRUCTIONS_NEW_FILE)
+
+
+# --- פונקציה ו-route חדשים לשליחת מייל ---
+
+def process_audio_for_email(request):
+    """
+    מבצע תמלול וסיכום, ושולח אותם במייל ללא הקראה.
+    משתמש בהיסטוריה הקיימת לצורך הסיכום.
+    """
+    file_url = request.args.get("file_url")
+    call_id = request.args.get("ApiCallId", str(int(time.time())))
+    phone_number = request.args.get("ApiPhone", "unknown")
+    # קבלת המייל מהפרמטרים של ימות, עם גיבוי למשתנה הסביבה
+    email_to = request.args.get("ApiEmail", DEFAULT_EMAIL_RECEIVER)
+
+    if not email_to:
+        logging.warning("⚠️ No email address provided (ApiEmail or DEFAULT_EMAIL_RECEIVER). Aborting email send.")
+        return Response("id_list_message=t-שגיאה, לא הוגדרה כתובת מייל לשליחה.go_to_folder=/8/6", mimetype="text/plain")
+
+    if not file_url.startswith("http"):
+        file_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={SYSTEM_TOKEN}&path=ivr2:/{file_url}"
+
+    logging.info(f"Downloading audio for email processing from: {file_url}")
+    try:
+        response = requests.get(file_url, timeout=20)
+        response.raise_for_status()
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_input:
+            temp_input.write(response.content)
+            temp_input.flush()
+            processed_audio = add_silence(temp_input.name)
+            
+            # 1. ביצוע תמלול (STT)
+            recognized_text = recognize_speech(processed_audio)
+            if not recognized_text:
+                return Response("לא זוהה דיבור ברור. אנא נסה שוב.", mimetype="text/plain")
+
+            # 2. ביצוע סיכום Gemini (תוך שימוש בהיסטוריה הקיימת)
+            gemini_result = {}
+            def run_gemini():
+                # אנו משתמשים ב-remember_history=True כדי שהסיכום יכלול את השיחות הקודמות
+                gemini_result["text"] = summarize_with_gemini(recognized_text, phone_number, INSTRUCTIONS_CONTINUE_FILE, remember_history=True)
+            gemini_thread = threading.Thread(target=run_gemini)
+            gemini_thread.start()
+            gemini_thread.join()
+
+            final_dvartorah_summary = gemini_result.get("text", "לא נוצר סיכום.")
+
+            # 3. הכנת תוכן המייל
+            subject = f"סיכום שיחה חדש מ: {phone_number}"
+            body = f"""
+שלום,
+
+התקבל תמלול וסיכום משיחה נכנסת.
+
+פרטי שיחה:
+- מספר טלפון: {phone_number}
+- מזהה שיחה: {call_id}
+
+-----------------------------------
+תמלול ההקלטה האחרונה:
+-----------------------------------
+{recognized_text}
+
+-----------------------------------
+סיכום מלא (כולל הקלטה זו):
+-----------------------------------
+{final_dvartorah_summary}
+
+"""
+            # 4. שליחת המייל
+            email_success = send_email(email_to, subject, body)
+
+            if email_success:
+                logging.info(f"✅ Email sent. Returning success message to Yemot.")
+                return Response("id_list_message=t-ההודעה נשלחה בהצלחה למייל.go_to_folder=/8/6", mimetype="text/plain")
+            else:
+                logging.error(f"❌ Email failed. Returning error message to Yemot.")
+                return Response("id_list_message=t-שגיאה בשליחת המייל, אנא נסה שוב.go_to_folder=/8/6", mimetype="text/plain")
+
+    except Exception as e:
+        logging.error(f"Critical error in email processing: {e}")
+        return Response(f"שגיאה קריטית בעיבוד למייל: {e}", mimetype="text/plain")
+
+@app.route("/upload_audio_to_email", methods=["GET"])
+def upload_audio_to_email():
+    """
+    כתובת חדשה שמקבלת הקלטה, מתמללת, מסכמת ושולחת במייל
+    ללא הקראה או שמירה בימות.
+    """
+    return process_audio_for_email(request)
 
 
 # ------------------ Run ------------------
 if __name__ == "__main__":
+# ... קיים קוד ...
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
