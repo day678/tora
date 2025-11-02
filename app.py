@@ -33,7 +33,7 @@ VOWELIZED_LEXICON = {}
 
 # --- הגדרות חדשות לשליחת מייל ---
 EMAIL_HOST = os.getenv("EMAIL_HOST") # שרת ה-SMTP שלכם
-EMAIL_PORT = int(os.getenv("EMAIL_PORT", 587)) # הפורט (587 עבור TLS)
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", 587)) # הפורט (587 עבור TLS, 465 עבור SSL)
 EMAIL_USER = os.getenv("EMAIL_USER") # שם המשתמש לשליחת מייל
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD") # סיסמת המייל
 DEFAULT_EMAIL_RECEIVER = os.getenv("DEFAULT_EMAIL_RECEIVER") # כתובת גיבוי אם לא סופק ApiEmail
@@ -271,7 +271,7 @@ playfile_end_goto=/11
         logging.error(f"❌ Error creating personal folder {folder_path}: {e}")
 
 
-# --- פונקציית עזר חדשה לשליחת מייל ---
+# --- פונקציית עזר חדשה לשליחת מייל (זוהי הפונקציה ששונתה) ---
 def send_email(to_address: str, subject: str, body: str) -> bool:
     """שולח מייל עם התוכן הנתון."""
     if not all([EMAIL_HOST, EMAIL_PORT, EMAIL_USER, EMAIL_PASSWORD, to_address]):
@@ -287,16 +287,35 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
         # גוף המייל עם קידוד UTF-8
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
         
-        server = smtplib.SMTP(EMAIL_HOST, EMAIL_PORT)
-        server.starttls()  # הפעלת הצפנת TLS
+        # --- שדרוג: התאמה לפורט 465 (SSL) או 587 (STARTTLS) ---
+        if EMAIL_PORT == 465:
+            # שימוש בחיבור SSL ישיר (כמו בדוגמת ה-PHP שמצאת)
+            logging.info(f"Connecting via SMTP_SSL to {EMAIL_HOST} on port {EMAIL_PORT}")
+            server = smtplib.SMTP_SSL(EMAIL_HOST, EMAIL_PORT, timeout=15)
+            # בשיטה זו, אין צורך לקרוא ל-starttls()
+        else:
+            # שימוש ב-STARTTLS (השיטה הקודמת)
+            logging.info(f"Connecting via SMTP (STARTTLS) to {EMAIL_HOST} on port {EMAIL_PORT}")
+            server = smtplib.SMTP(EMAIL_HOST, EMAIL_PORT, timeout=15)
+            server.starttls()  # הפעלת הצפנת TLS
+        # --- סוף השדרוג ---
+
         server.login(EMAIL_USER, EMAIL_PASSWORD)
         text = msg.as_string()
         server.sendmail(EMAIL_USER, to_address, text)
         server.quit()
         logging.info(f"✅ Email sent successfully to {to_address}")
         return True
+    except smtplib.SMTPAuthenticationError:
+        logging.error(f"❌ Failed to send email: Authentication failed.")
+        logging.error(f"❌ בדוק שמשתנה הסביבה EMAIL_USER ו-EMAIL_PASSWORD נכונים (בלי רווחים).")
+        return False
+    except smtplib.SMTPException as e:
+        logging.error(f"❌ Failed to send email (SMTPException): {e}")
+        return False
     except Exception as e:
-        logging.error(f"❌ Failed to send email: {e}")
+        # עכשיו נוכל לראות שגיאות כמו "Timeout" או "Authentication failed"
+        logging.error(f"❌ Failed to send email (General Exception): {e}") 
         return False
 
 
@@ -404,6 +423,15 @@ def process_audio_for_email(request):
     # קבלת המייל מהפרמטרים של ימות, עם גיבוי למשתנה הסביבה
     email_to = request.args.get("ApiEmail", DEFAULT_EMAIL_RECEIVER)
 
+    # --- תוספת: בדיקה למניעת קריסה ---
+    # (זוהי התוספת מהפעם הקודמת, לוודא שה-ext.ini נכון)
+    if not file_url:
+        logging.error("❌ שגיאת הגדרה: פרמטר 'file_url' חסר.")
+        logging.error("❌ יש לוודא שקובץ ext.ini בשלוחה בימות המשיח מכיל את השורה: api_000=file_url,,record,,,,,no")
+        # החזרת הודעת שגיאה ברורה למאזין
+        return Response("id_list_message=t-שגיאת הגדרה חמורה במערכת, הקלטה לא התקבלה. אנא פנה למנהל.go_to_folder=/8/6", mimetype="text/plain")
+    # --- סוף התוספת ---
+
     if not email_to:
         logging.warning("⚠️ No email address provided (ApiEmail or DEFAULT_EMAIL_RECEIVER). Aborting email send.")
         return Response("id_list_message=t-שגיאה, לא הוגדרה כתובת מייל לשליחה.go_to_folder=/8/6", mimetype="text/plain")
@@ -486,4 +514,3 @@ if __name__ == "__main__":
 # ... קיים קוד ...
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
