@@ -334,7 +334,7 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
             
             # נחזיר תגובה מיידית למערכת הטלפונית
             wait_message = "t-הבקשה התקבלה.t-הסיכום ימתין לכם בתיקייה האישית בעוד כדקה.t-כעת מועברים לתפריט."
-            playback_command = f"read={wait_message},go_to_folder=/8/6"
+            playback_command = f"id_list_message={wait_message}&go_to_folder=/8/6"
             
             logging.info(f"[{phone_number} | {call_id}] Returning immediate IVR command: {playback_command}")
             return Response(playback_command, mimetype="text/plain")
