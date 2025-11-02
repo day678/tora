@@ -260,6 +260,23 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
     call_id = request.args.get("ApiCallId", str(int(time.time())))
     phone_number = request.args.get("ApiPhone", "unknown")
 
+    # ------------------ תוספת: מחיקת היסטוריה קודמת בנושא חדש ------------------
+    if not remember_history:
+        # הבקשה הגיעה מ /upload_audio_new
+        # 1. נמחק את ההיסטוריה הישנה של מספר זה
+        history_path = f"/tmp/conversations/{phone_number}.json"
+        if os.path.exists(history_path):
+            try:
+                os.remove(history_path)
+                logging.info(f"🗑️ נמחקה היסטוריה ישנה עבור {phone_number} (נושא חדש).")
+            except Exception as e:
+                logging.warning(f"⚠️ לא ניתן היה למחוק קובץ היסטוריה ישן {history_path}: {e}")
+        
+        # 2. נקבע שהשיחה הנוכחית כן תישמר כהתחלה של ההיסטוריה החדשה
+        # לכן, אנו דורסים את המשתנה ל-True עבור המשך הריצה של פונקציה זו
+        remember_history = True
+    # ------------------ סוף התוספת ------------------
+
     if not file_url.startswith("http"):
         file_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={SYSTEM_TOKEN}&path=ivr2:/{file_url}"
 
