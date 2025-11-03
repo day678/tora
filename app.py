@@ -273,7 +273,7 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
         # הרכבת ה-Payload (הנתונים הנשלחים)
         payload = {
             "sender": {
-                "email": "no-reply@brevo.com",  # שולח ניטרלי ש-Brevo מרשה
+                "email": EMAIL_USER,
                 "name": EMAIL_SENDER_NAME
             },
             "to": [
