@@ -13,11 +13,8 @@ from pydub import AudioSegment
 import speech_recognition as sr
 from google.cloud import texttospeech
 # --- הוספת ספריות מייל ---
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.header import Header
-
+# לא נדרשת יותר smtplib או email.mime
+# נשתמש רק ב-requests
 # ------------------ Configuration ------------------
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_CREDENTIALS_B64 = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_B64")
@@ -31,16 +28,13 @@ INSTRUCTIONS_NEW_FILE = "instructions_new.txt"
 VOWELIZED_LEXICON_FILE = "vowelized_lexicon.txt"
 VOWELIZED_LEXICON = {}
 
-# --- הגדרות חדשות לשליחת מייל ---
-EMAIL_HOST = os.getenv("EMAIL_HOST") # שרת ה-SMTP שלכם
-EMAIL_PORT = int(os.getenv("EMAIL_PORT", 587)) # הפורט (587 עבור TLS, 465 עבור SSL)
-EMAIL_USER = os.getenv("EMAIL_USER") # שם המשתמש לשליחת מייל
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD") # סיסמת המייל
+# --- הגדרות חדשות לשליחת מייל (Elastic Email) ---
+ELASTICEMAIL_API_KEY = os.getenv("ELASTICEMAIL_API_KEY") # מפתח API חדש
+EMAIL_USER = os.getenv("EMAIL_USER") # כתובת המייל המאומתת (השולח)
 DEFAULT_EMAIL_RECEIVER = os.getenv("DEFAULT_EMAIL_RECEIVER") # כתובת גיבוי אם לא סופק ApiEmail
 EMAIL_SENDER_NAME = "מערכת סיכום שיחות" # השם שיופיע כשולח
 
 # ------------------ Logging ------------------
-# ... קיים קוד ...
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -50,7 +44,6 @@ logging.basicConfig(
 app = Flask(__name__)
 
 # יצירת קובץ זמני למפתח של Google Cloud
-# ... קיים קוד ...
 if GOOGLE_CREDENTIALS_B64:
     creds_json = base64.b64decode(GOOGLE_CREDENTIALS_B64).decode("utf-8")
     temp_cred_path = "/tmp/google_creds.json"
@@ -65,7 +58,6 @@ else:
 # ------------------ Helper Functions ------------------
 
 def load_vowelized_lexicon():
-# ... קיים קוד ...
     """טוען את קובץ המילים המנוקדות לזיכרון."""
     global VOWELIZED_LEXICON
     try:
@@ -82,14 +74,12 @@ def load_vowelized_lexicon():
 
 
 def add_silence(input_path: str) -> AudioSegment:
-# ... קיים קוד ...
     audio = AudioSegment.from_file(input_path, format="wav")
     silence = AudioSegment.silent(duration=1000)
     return silence + audio + silence
 
 
 def recognize_speech(audio_segment: AudioSegment) -> str:
-# ... קיים קוד ...
     recognizer = sr.Recognizer()
     try:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_wav:
@@ -107,7 +97,6 @@ def recognize_speech(audio_segment: AudioSegment) -> str:
 
 
 def load_instructions(file_path: str) -> str:
-# ... קיים קוד ...
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             return f.read().strip()
@@ -117,7 +106,6 @@ def load_instructions(file_path: str) -> str:
 
 
 def clean_text_for_tts(text: str) -> str:
-# ... קיים קוד ...
     text = re.sub(r'[A-Za-z*#@^_^~\[\]{}()<>+=_|\\\/]', '', text)
     text = re.sub(r'[^\w\s,.!?אבגדהוזחטיכלמנסעפצקרשתםןףךץ]', '', text)
     text = re.sub(r'\s+', ' ', text)
@@ -125,7 +113,6 @@ def clean_text_for_tts(text: str) -> str:
 
 
 def apply_vowelized_lexicon(text: str) -> str:
-# ... קיים קוד ...
     if not VOWELIZED_LEXICON:
         return f'<speak lang="he-IL">{text}</speak>'
     processed_text = text
@@ -136,7 +123,6 @@ def apply_vowelized_lexicon(text: str) -> str:
 
 
 def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
-# ... קיים קוד ...
     if not text_to_summarize or not GEMINI_API_KEY:
         logging.warning("Skipping Gemini summarization: Missing text or API key.")
         return "שגיאה: לא ניתן לנסח דבר תורה."
@@ -190,7 +176,6 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
 
 
 def synthesize_with_google_tts(text: str) -> str:
-# ... קיים קוד ...
     cleaned_text = clean_text_for_tts(text)
     ssml_text = apply_vowelized_lexicon(cleaned_text)
     if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
@@ -208,7 +193,6 @@ def synthesize_with_google_tts(text: str) -> str:
 
 
 def upload_to_yemot(audio_path: str, yemot_full_path: str):
-# ... קיים קוד ...
     url = "https://www.call2all.co.il/ym/api/UploadFile"
     path_no_file = os.path.dirname(yemot_full_path)
     file_name = os.path.basename(yemot_full_path)
@@ -227,7 +211,6 @@ def upload_to_yemot(audio_path: str, yemot_full_path: str):
 
 # ✅ פונקציה חדשה לווידוא יצירת תיקייה אישית מוגדרת כהשמעת קבצים
 def ensure_personal_folder_exists(phone_number: str):
-# ... קיים קוד ...
     """מוודא שתיקייה אישית קיימת ובעלת הגדרות השמעת קבצים."""
     folder_path = f"{BASE_YEMOT_FOLDER}/{phone_number}"
     url_check = "https://www.call2all.co.il/ym/api/GetFiles"
@@ -271,51 +254,54 @@ playfile_end_goto=/11
         logging.error(f"❌ Error creating personal folder {folder_path}: {e}")
 
 
-# --- פונקציית עזר חדשה לשליחת מייל (זוהי הפונקציה ששונתה) ---
+# --- פונקציית עזר חדשה לשליחת מייל (Elastic Email API) ---
 def send_email(to_address: str, subject: str, body: str) -> bool:
-    """שולח מייל עם התוכן הנתון."""
-    if not all([EMAIL_HOST, EMAIL_PORT, EMAIL_USER, EMAIL_PASSWORD, to_address]):
-        logging.error("❌ Email configuration is missing. Cannot send email.")
+    """שולח מייל עם התוכן הנתון באמצעות Elastic Email HTTP API."""
+    
+    ELASTICEMAIL_API_KEY = os.getenv("ELASTICEMAIL_API_KEY")
+    
+    if not all([ELASTICEMAIL_API_KEY, EMAIL_USER, to_address]):
+        logging.error("❌ Elastic Email configuration is incomplete (API Key or EMAIL_USER missing).")
         return False
+    
+    logging.info(f"Sending email via Elastic Email API to {to_address}")
 
     try:
-        msg = MIMEMultipart()
-        msg['From'] = f'"{Header(EMAIL_SENDER_NAME, "utf-8").encode()}" <{EMAIL_USER}>'
-        msg['To'] = to_address
-        msg['Subject'] = Header(subject, 'utf-8').encode()
+        # הרכבת ה-Payload (הנתונים הנשלחים)
+        payload = {
+            "apikey": ELASTICEMAIL_API_KEY,
+            "from": EMAIL_USER,
+            "fromName": "מערכת סיכום שיחות",
+            "to": to_address,
+            "subject": subject,
+            "bodyText": body,
+            "isTransactional": True
+        }
         
-        # גוף המייל עם קידוד UTF-8
-        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+        # כתובת ה-API של Elastic Email
+        api_url = "https://api.elasticemail.com/v2/email/send"
         
-        # --- שדרוג: התאמה לפורט 465 (SSL) או 587 (STARTTLS) ---
-        if EMAIL_PORT == 465:
-            # שימוש בחיבור SSL ישיר (כמו בדוגמת ה-PHP שמצאת)
-            logging.info(f"Connecting via SMTP_SSL to {EMAIL_HOST} on port {EMAIL_PORT}")
-            server = smtplib.SMTP_SSL(EMAIL_HOST, EMAIL_PORT, timeout=15)
-            # בשיטה זו, אין צורך לקרוא ל-starttls()
-        else:
-            # שימוש ב-STARTTLS (השיטה הקודמת)
-            logging.info(f"Connecting via SMTP (STARTTLS) to {EMAIL_HOST} on port {EMAIL_PORT}")
-            server = smtplib.SMTP(EMAIL_HOST, EMAIL_PORT, timeout=15)
-            server.starttls()  # הפעלת הצפנת TLS
-        # --- סוף השדרוג ---
+        # ביצוע בקשת ה-HTTP POST
+        response = requests.post(
+            api_url,
+            data=payload
+        )
+        
+        data = response.json()
 
-        server.login(EMAIL_USER, EMAIL_PASSWORD)
-        text = msg.as_string()
-        server.sendmail(EMAIL_USER, to_address, text)
-        server.quit()
-        logging.info(f"✅ Email sent successfully to {to_address}")
-        return True
-    except smtplib.SMTPAuthenticationError:
-        logging.error(f"❌ Failed to send email: Authentication failed.")
-        logging.error(f"❌ בדוק שמשתנה הסביבה EMAIL_USER ו-EMAIL_PASSWORD נכונים (בלי רווחים).")
-        return False
-    except smtplib.SMTPException as e:
-        logging.error(f"❌ Failed to send email (SMTPException): {e}")
-        return False
+        if response.status_code == 200 and data.get("success") == True:
+            logging.info(f"✅ Email sent successfully via Elastic Email API (Status: 200)")
+            return True
+        else:
+            logging.error(f"❌ Failed to send email via Elastic Email API (Status: {response.status_code})")
+            logging.error(f"❌ Elastic Email Response: {data}")
+            # במקרה של שגיאה, ננסה להציג את הודעת השגיאה
+            error_msg = data.get("error")
+            logging.error(f"❌ Elastic Email Error Message: {error_msg}")
+            return False
+            
     except Exception as e:
-        # עכשיו נוכל לראות שגיאות כמו "Timeout" או "Authentication failed"
-        logging.error(f"❌ Failed to send email (General Exception): {e}") 
+        logging.error(f"❌ Failed to send email (Elastic Email General Exception): {e}") 
         return False
 
 
@@ -325,12 +311,10 @@ load_vowelized_lexicon()
 
 @app.route("/health", methods=["GET"])
 def health():
-# ... קיים קוד ...
     return Response("OK", status=200, mimetype="text/plain")
 
 
 def process_audio_request(request, remember_history: bool, instruction_file: str):
-# ... קיים קוד ...
     file_url = request.args.get("file_url")
     call_id = request.args.get("ApiCallId", str(int(time.time())))
     phone_number = request.args.get("ApiPhone", "unknown")
@@ -400,13 +384,11 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
 
 @app.route("/upload_audio_continue", methods=["GET"])
 def upload_audio_continue():
-# ... קיים קוד ...
     return process_audio_request(request, remember_history=True, instruction_file=INSTRUCTIONS_CONTINUE_FILE)
 
 
 @app.route("/upload_audio_new", methods=["GET"])
 def upload_audio_new():
-# ... קיים קוד ...
     return process_audio_request(request, remember_history=False, instruction_file=INSTRUCTIONS_NEW_FILE)
 
 
@@ -511,6 +493,5 @@ def upload_audio_to_email():
 
 # ------------------ Run ------------------
 if __name__ == "__main__":
-# ... קיים קוד ...
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
