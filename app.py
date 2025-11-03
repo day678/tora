@@ -12,9 +12,9 @@ from flask import Flask, request, Response
 from pydub import AudioSegment
 import speech_recognition as sr
 from google.cloud import texttospeech
-# --- הוספת ספריות מייל ---
-# לא נדרשת יותר smtplib או email.mime
+# --- ספריות מייל כבר לא בשימוש (smtplib, sendgrid) ---
 # נשתמש רק ב-requests
+
 # ------------------ Configuration ------------------
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_CREDENTIALS_B64 = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_B64")
@@ -28,8 +28,8 @@ INSTRUCTIONS_NEW_FILE = "instructions_new.txt"
 VOWELIZED_LEXICON_FILE = "vowelized_lexicon.txt"
 VOWELIZED_LEXICON = {}
 
-# --- הגדרות חדשות לשליחת מייל (Elastic Email) ---
-ELASTICEMAIL_API_KEY = os.getenv("ELASTICEMAIL_API_KEY") # מפתח API חדש
+# --- הגדרות חדשות לשליחת מייל (Brevo) ---
+BREVO_API_KEY = os.getenv("BREVO_API_KEY") # מפתח API חדש
 EMAIL_USER = os.getenv("EMAIL_USER") # כתובת המייל המאומתת (השולח)
 DEFAULT_EMAIL_RECEIVER = os.getenv("DEFAULT_EMAIL_RECEIVER") # כתובת גיבוי אם לא סופק ApiEmail
 EMAIL_SENDER_NAME = "מערכת סיכום שיחות" # השם שיופיע כשולח
@@ -254,54 +254,61 @@ playfile_end_goto=/11
         logging.error(f"❌ Error creating personal folder {folder_path}: {e}")
 
 
-# --- פונקציית עזר חדשה לשליחת מייל (Elastic Email API) ---
+# --- פונקציית עזר חדשה לשליחת מייל (Brevo API) ---
 def send_email(to_address: str, subject: str, body: str) -> bool:
-    """שולח מייל עם התוכן הנתון באמצעות Elastic Email HTTP API."""
+    """שולח מייל עם התוכן הנתון באמצעות Brevo (Sendinblue) HTTP API."""
     
-    ELASTICEMAIL_API_KEY = os.getenv("ELASTICEMAIL_API_KEY")
+    BREVO_API_KEY = os.getenv("BREVO_API_KEY")
     
-    if not all([ELASTICEMAIL_API_KEY, EMAIL_USER, to_address]):
-        logging.error("❌ Elastic Email configuration is incomplete (API Key or EMAIL_USER missing).")
+    if not all([BREVO_API_KEY, EMAIL_USER, to_address]):
+        logging.error("❌ Brevo configuration is incomplete (API Key or EMAIL_USER missing).")
         return False
     
-    logging.info(f"Sending email via Elastic Email API to {to_address}")
+    logging.info(f"Sending email via Brevo API to {to_address} from {EMAIL_USER}")
 
     try:
+        # כתובת ה-API של Brevo
+        api_url = "https://api.brevo.com/v3/smtp/email"
+        
         # הרכבת ה-Payload (הנתונים הנשלחים)
         payload = {
-            "apikey": ELASTICEMAIL_API_KEY,
-            "from": EMAIL_USER,
-            "fromName": "מערכת סיכום שיחות",
-            "to": to_address,
+            "sender": {
+                "email": EMAIL_USER,
+                "name": EMAIL_SENDER_NAME
+            },
+            "to": [
+                {
+                    "email": to_address
+                }
+            ],
             "subject": subject,
-            "bodyText": body,
-            "isTransactional": True
+            "textContent": body
         }
         
-        # כתובת ה-API של Elastic Email
-        api_url = "https://api.elasticemail.com/v2/email/send"
+        # הרכבת ה-Headers
+        headers = {
+            "accept": "application/json",
+            "api-key": BREVO_API_KEY,
+            "content-type": "application/json"
+        }
         
         # ביצוע בקשת ה-HTTP POST
-        response = requests.post(
-            api_url,
-            data=payload
-        )
+        response = requests.post(api_url, json=payload, headers=headers)
         
         data = response.json()
 
-        if response.status_code == 200 and data.get("success") == True:
-            logging.info(f"✅ Email sent successfully via Elastic Email API (Status: 200)")
+        if response.status_code == 201: # 201 Creado הוא סטטוס ההצלחה של Brevo
+            logging.info(f"✅ Email sent successfully via Brevo API (Status: 201, MessageID: {data.get('messageId')})")
             return True
         else:
-            logging.error(f"❌ Failed to send email via Elastic Email API (Status: {response.status_code})")
-            logging.error(f"❌ Elastic Email Response: {data}")
-            # במקרה של שגיאה, ננסה להציג את הודעת השגיאה
-            error_msg = data.get("error")
-            logging.error(f"❌ Elastic Email Error Message: {error_msg}")
+            logging.error(f"❌ Failed to send email via Brevo API (Status: {response.status_code})")
+            logging.error(f"❌ Brevo Response: {data}")
+            error_msg = data.get("message")
+            logging.error(f"❌ Brevo Error Message: {error_msg}")
             return False
             
     except Exception as e:
-        logging.error(f"❌ Failed to send email (Elastic Email General Exception): {e}") 
+        logging.error(f"❌ Failed to send email (Brevo General Exception): {e}") 
         return False
 
 
