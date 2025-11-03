@@ -273,6 +273,26 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
         api_url = "https://api.brevo.com/v3/smtp/email"
         
         # הרכבת ה-Payload (הנתונים הנשלחים)
+        # שינוי כאן: אנו שולחים את body כ-htmlContent במקום textContent
+        html_content = f"""
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                body {{ direction: rtl; font-family: Arial, sans-serif; line-height: 1.6; }}
+                .container {{ direction: rtl; text-align: right; width: 100%; }}
+                .content {{ margin-top: 20px; padding: 15px; border: 1px solid #ddd; background-color: #f9f9f9; }}
+                h3 {{ border-bottom: 1px solid #eee; padding-bottom: 5px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                {body.replace('\\n', '<br>')}
+            </div>
+        </body>
+        </html>
+        """
+
         payload = {
             # שימו לב: Brevo ישלח מ-EMAIL_USER, אבל יציג את ה-name
             "sender": {
@@ -285,7 +305,7 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
                 }
             ],
             "subject": subject,
-            "textContent": body
+            "htmlContent": html_content # שימוש ב-HTML במקום טקסט רגיל
         }
         
         # הרכבת ה-Headers
