@@ -286,8 +286,8 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
             </style>
         </head>
         <body>
-            <div class="container">
-                {body.replace('\\n', '<br>')}
+            <div class="container" dir="rtl">
+                {body.replace('\n', '<br>')}
             </div>
         </body>
         </html>
