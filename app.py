@@ -12,6 +12,8 @@ from flask import Flask, request, Response
 from pydub import AudioSegment
 import speech_recognition as sr
 from google.cloud import texttospeech
+# --- ספריות מייל כבר לא בשימוש (smtplib, sendgrid) ---
+# נשתמש רק ב-requests
 
 # ------------------ Configuration ------------------
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -28,11 +30,9 @@ VOWELIZED_LEXICON = {}
 
 # --- הגדרות חדשות לשליחת מייל (Brevo) ---
 BREVO_API_KEY = os.getenv("BREVO_API_KEY") # מפתח API חדש
-# שימוש בכתובת המאומתת שלך (EMAIL_USER) חייב להישאר, אחרת Brevo יחסום
-EMAIL_USER = os.getenv("EMAIL_USER") 
-DEFAULT_EMAIL_RECEIVER = os.getenv("DEFAULT_EMAIL_RECEIVER") 
-# שינוי כאן: השם שיוצג לנמען
-EMAIL_SENDER_NAME = "שירות סיכומי שיחות" 
+EMAIL_USER = os.getenv("EMAIL_USER") # כתובת המייל המאומתת (השולח)
+DEFAULT_EMAIL_RECEIVER = os.getenv("DEFAULT_EMAIL_RECEIVER") # כתובת גיבוי אם לא סופק ApiEmail
+EMAIL_SENDER_NAME = "מערכת סיכום שיחות" # השם שיופיע כשולח
 
 # ------------------ Logging ------------------
 logging.basicConfig(
@@ -264,40 +264,37 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
         logging.error("❌ Brevo configuration is incomplete (API Key or EMAIL_USER missing).")
         return False
     
-    # --- שינוי כאן: שימוש ב-EMAIL_SENDER_NAME בלבד בתצוגה ---
-    # Brevo דורש את EMAIL_USER ב-JSON, אבל ניתן לשחק עם השם המוצג.
     logging.info(f"Sending email via Brevo API to {to_address} from {EMAIL_USER}")
 
     try:
         # כתובת ה-API של Brevo
         api_url = "https://api.brevo.com/v3/smtp/email"
         
-        # הרכבת ה-Payload (הנתונים הנשלחים)
-        # שינוי כאן: אנו שולחים את body כ-htmlContent במקום textContent
+        # --- כאן התיקון ---
+        # 1. המרת שורות חדשות לתגי <br> של HTML
+        html_body = body.replace('\n', '<br>')
+        
+        # 2. עטיפת התוכן ב-HTML בסיסי עם הגדרות RTL
         html_content = f"""
         <html>
         <head>
             <meta charset="UTF-8">
             <style>
-                body {{ direction: rtl; font-family: Arial, sans-serif; line-height: 1.6; }}
-                .container {{ direction: rtl; text-align: right; width: 100%; }}
-                .content {{ margin-top: 20px; padding: 15px; border: 1px solid #ddd; background-color: #f9f9f9; }}
-                h3 {{ border-bottom: 1px solid #eee; padding-bottom: 5px; }}
+                body {{ direction: rtl; font-family: Arial, sans-serif; text-align: right; }}
             </style>
         </head>
-        <body>
-            <div class="container" dir="rtl">
-                {body.replace('\n', '<br>')}
-            </div>
+        <body dir="rtl">
+            {html_body}
         </body>
         </html>
         """
+        # --- סוף התיקון ---
 
+        # הרכבת ה-Payload (הנתונים הנשלחים)
         payload = {
-            # שימו לב: Brevo ישלח מ-EMAIL_USER, אבל יציג את ה-name
             "sender": {
                 "email": EMAIL_USER,
-                "name": EMAIL_SENDER_NAME 
+                "name": EMAIL_SENDER_NAME
             },
             "to": [
                 {
@@ -305,7 +302,8 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
                 }
             ],
             "subject": subject,
-            "htmlContent": html_content # שימוש ב-HTML במקום טקסט רגיל
+            # 3. שינוי מ-textContent ל-htmlContent
+            "htmlContent": html_content
         }
         
         # הרכבת ה-Headers
