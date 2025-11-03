@@ -12,8 +12,6 @@ from flask import Flask, request, Response
 from pydub import AudioSegment
 import speech_recognition as sr
 from google.cloud import texttospeech
-# --- ספריות מייל כבר לא בשימוש (smtplib, sendgrid) ---
-# נשתמש רק ב-requests
 
 # ------------------ Configuration ------------------
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -30,9 +28,11 @@ VOWELIZED_LEXICON = {}
 
 # --- הגדרות חדשות לשליחת מייל (Brevo) ---
 BREVO_API_KEY = os.getenv("BREVO_API_KEY") # מפתח API חדש
-EMAIL_USER = os.getenv("EMAIL_USER") # כתובת המייל המאומתת (השולח)
-DEFAULT_EMAIL_RECEIVER = os.getenv("DEFAULT_EMAIL_RECEIVER") # כתובת גיבוי אם לא סופק ApiEmail
-EMAIL_SENDER_NAME = "מערכת סיכום שיחות" # השם שיופיע כשולח
+# שימוש בכתובת המאומתת שלך (EMAIL_USER) חייב להישאר, אחרת Brevo יחסום
+EMAIL_USER = os.getenv("EMAIL_USER") 
+DEFAULT_EMAIL_RECEIVER = os.getenv("DEFAULT_EMAIL_RECEIVER") 
+# שינוי כאן: השם שיוצג לנמען
+EMAIL_SENDER_NAME = "שירות סיכומי שיחות" 
 
 # ------------------ Logging ------------------
 logging.basicConfig(
@@ -264,6 +264,8 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
         logging.error("❌ Brevo configuration is incomplete (API Key or EMAIL_USER missing).")
         return False
     
+    # --- שינוי כאן: שימוש ב-EMAIL_SENDER_NAME בלבד בתצוגה ---
+    # Brevo דורש את EMAIL_USER ב-JSON, אבל ניתן לשחק עם השם המוצג.
     logging.info(f"Sending email via Brevo API to {to_address} from {EMAIL_USER}")
 
     try:
@@ -272,9 +274,10 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
         
         # הרכבת ה-Payload (הנתונים הנשלחים)
         payload = {
+            # שימו לב: Brevo ישלח מ-EMAIL_USER, אבל יציג את ה-name
             "sender": {
                 "email": EMAIL_USER,
-                "name": EMAIL_SENDER_NAME
+                "name": EMAIL_SENDER_NAME 
             },
             "to": [
                 {
