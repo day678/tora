@@ -540,7 +540,7 @@ def process_audio_for_email(request):
 
             if email_success:
                 logging.info(f"✅ Email sent. Returning success message to Yemot.")
-                return Response("id_list_message=t-ההודעה נשלחה בהצלחה למייל.go_to_folder=/", mimetype="text/plain")
+                return Response("id_list_message=t-ההודעה נשלחה בהצלחה למייל&go_to_folder=/", mimetype="text/plain")
             else:
                 logging.error(f"❌ Email failed. Returning error message to Yemot.")
                 return Response("id_list_message=t-שגיאה בשליחת המייל, אנא נסה שוב.go_to_folder=/", mimetype="text/plain")
