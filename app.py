@@ -24,6 +24,8 @@ BASE_YEMOT_FOLDER = "ivr2:/85"  # שלוחה ראשית לכל הקבצים
 
 INSTRUCTIONS_CONTINUE_FILE = "instructions_continue.txt"
 INSTRUCTIONS_NEW_FILE = "instructions_new.txt"
+# --- הוספת קובץ הנחיות חדש עבור המייל ---
+INSTRUCTIONS_EMAIL_FILE = "instructions_email.txt"
 
 VOWELIZED_LEXICON_FILE = "vowelized_lexicon.txt"
 VOWELIZED_LEXICON = {}
@@ -102,7 +104,8 @@ def load_instructions(file_path: str) -> str:
             return f.read().strip()
     except Exception:
         logging.warning(f"⚠️ Instruction file {file_path} not found or unreadable.")
-        return "אתה עורך תורני המסכם דברי תורה בקצרה ובבהירות."
+        # הנחיית ברירת מחדל אם הקובץ לא נמצא
+        return "סכם את ההודעה הבאה בצורה ברורה ותמציתית."
 
 
 def clean_text_for_tts(text: str) -> str:
@@ -304,8 +307,8 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
         # מחליפים את הכותרות ב-body לתגי <h2> ואת הקוים ב-HTML
         body_for_html = body
         body_for_html = body_for_html.replace('-----------------------------------', '<hr>')
-        body_for_html = body_for_html.replace('**תמלול ההקלטה האחרונה:**', '<h2>תמלול ההקלטה האחרונה</h2>')
-        body_for_html = body_for_html.replace('**סיכום מלא (כולל הקלטה זו):**', '<h2>סיכום מלא</h2>')
+        body_for_html = body_for_html.replace('תמלול ההקלטה האחרונה:', '<h2>תמלול ההקלטה האחרונה:</h2>')
+        body_for_html = body_for_html.replace('סיכום מלא:', '<h2>סיכום מלא:</h2>')
         
         # בנייה מחדש של גוף המייל (כדי שיוצב נכון)
         html_content = f"""
@@ -322,7 +325,7 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
             <p>שלום,</p>
             <p>התקבל תמלול וסיכום משיחה נכנסת.</p>
             
-            {html_body.replace('\n', '<br>')}
+            {body_for_html.replace('\n', '<br>')}
             
             <hr>
             <p><b>תודה על השימוש בשירות.</b></p>
@@ -506,8 +509,10 @@ def process_audio_for_email(request):
             # 2. ביצוע סיכום Gemini (תוך שימוש בהיסטוריה הקיימת)
             gemini_result = {}
             def run_gemini():
-                # אנו משתמשים ב-remember_history=True כדי שהסיכום יכלול את השיחות הקודמות
-                gemini_result["text"] = summarize_with_gemini(recognized_text, phone_number, INSTRUCTIONS_CONTINUE_FILE, remember_history=True)
+                # --- כאן השינוי ---
+                # שימוש בקובץ הנחיות ייעודי למייל
+                gemini_result["text"] = summarize_with_gemini(recognized_text, phone_number, INSTRUCTIONS_EMAIL_FILE, remember_history=True)
+                # --- סוף השינוי ---
             gemini_thread = threading.Thread(target=run_gemini)
             gemini_thread.start()
             gemini_thread.join()
@@ -518,24 +523,17 @@ def process_audio_for_email(request):
             subject = f"סיכום שיחה חדש מ: {phone_number}"
             # --- בניית גוף ההודעה עם תגי HTML לצורך הדגשה וגודל ---
             body_content = f"""
-שלום,
-
-התקבל תמלול וסיכום משיחה נכנסת.
-
 <b>פרטי השיחה:</b>
 - מספר טלפון: {phone_number}
 - מזהה שיחה: {call_id}
 
 <hr>
 <h2>תמלול ההקלטה האחרונה:</h2>
-{recognized_text}
+<p>{recognized_text}</p>
 
 <hr>
 <h2>סיכום מלא:</h2>
-{final_dvartorah_summary}
-
-<br><br>
-<b>--- תודה על השימוש בשירות! לפניות במייל: A0330356858@GMAIL.COM ---</b>
+<p>{final_dvartorah_summary}</p>
 """
             # 4. שליחת המייל
             email_success = send_email(email_to, subject, body_content)
