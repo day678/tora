@@ -276,7 +276,9 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
         # --- כאן התיקון ל-RTL, הדגשה וטקסט קבוע ---
         
         # 1. המרת שורות חדשות לתגי <br> של HTML, וניקוי גוף ההודעה
-        html_body = body.replace('\n', '<br>')
+        # (התיקון של ה-SyntaxError נמצא כאן)
+        nl = '\n'
+        html_body = body.replace(nl, '<br>')
         
         # 2. הוספת טקסט קבוע בסוף המייל
         fixed_footer = "<br><br>---<br><b>תודה על השימוש בשירות.</b>"
@@ -325,7 +327,7 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
             <p>שלום,</p>
             <p>התקבל תמלול וסיכום משיחה נכנסת.</p>
             
-            {body_for_html.replace('\n', '<br>')}
+            {body_for_html.replace(nl, '<br>')}
             
             <hr>
             <p><b>תודה על השימוש בשירות.</b></p>
@@ -562,3 +564,4 @@ def upload_audio_to_email():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
