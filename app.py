@@ -270,21 +270,62 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
         # כתובת ה-API של Brevo
         api_url = "https://api.brevo.com/v3/smtp/email"
         
-        # --- כאן התיקון ---
-        # 1. המרת שורות חדשות לתגי <br> של HTML
+        # --- כאן התיקון ל-RTL, הדגשה וטקסט קבוע ---
+        
+        # 1. המרת שורות חדשות לתגי <br> של HTML, וניקוי גוף ההודעה
         html_body = body.replace('\n', '<br>')
         
-        # 2. עטיפת התוכן ב-HTML בסיסי עם הגדרות RTL
+        # 2. הוספת טקסט קבוע בסוף המייל
+        fixed_footer = "<br><br>---<br><b>תודה על השימוש בשירות.</b>"
+        
+        # 3. הגדרת כותרות מודגשות ומוגדלות (באמצעות תגי <h2>)
         html_content = f"""
         <html>
         <head>
             <meta charset="UTF-8">
             <style>
                 body {{ direction: rtl; font-family: Arial, sans-serif; text-align: right; }}
+                h2 {{ color: #333; font-size: 18px; margin-top: 15px; border-bottom: 1px solid #eee; padding-bottom: 5px; }}
             </style>
         </head>
         <body dir="rtl">
-            {html_body}
+            <p>שלום,</p>
+            <p>התקבל תמלול וסיכום משיחה נכנסת.</p>
+            
+            <h2>**פרטי השיחה**</h2>
+            <p>{html_body}</p>
+            
+            {fixed_footer}
+        </body>
+        </html>
+        """
+
+        # 4. התאמת ה-body להצבה ב-HTML
+        # מחליפים את הכותרות ב-body לתגי <h2> ואת הקוים ב-HTML
+        body_for_html = body
+        body_for_html = body_for_html.replace('-----------------------------------', '<hr>')
+        body_for_html = body_for_html.replace('**תמלול ההקלטה האחרונה:**', '<h2>תמלול ההקלטה האחרונה</h2>')
+        body_for_html = body_for_html.replace('**סיכום מלא (כולל הקלטה זו):**', '<h2>סיכום מלא</h2>')
+        
+        # בנייה מחדש של גוף המייל (כדי שיוצב נכון)
+        html_content = f"""
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                body {{ direction: rtl; font-family: Arial, sans-serif; text-align: right; }}
+                h2 {{ color: #004d99; font-size: 18px; margin-top: 20px; border-bottom: 1px solid #eee; padding-bottom: 5px; }}
+                b {{ font-weight: bold; }}
+            </style>
+        </head>
+        <body dir="rtl">
+            <p>שלום,</p>
+            <p>התקבל תמלול וסיכום משיחה נכנסת.</p>
+            
+            {html_body.replace('\n', '<br>')}
+            
+            <hr>
+            <p><b>תודה על השימוש בשירות.</b></p>
         </body>
         </html>
         """
@@ -302,8 +343,7 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
                 }
             ],
             "subject": subject,
-            # 3. שינוי מ-textContent ל-htmlContent
-            "htmlContent": html_content
+            "htmlContent": html_content # שימוש ב-HTML במקום טקסט רגיל
         }
         
         # הרכבת ה-Headers
@@ -476,30 +516,33 @@ def process_audio_for_email(request):
 
             # 3. הכנת תוכן המייל
             subject = f"סיכום שיחה חדש מ: {phone_number}"
-            body = f"""
+            # --- בניית גוף ההודעה עם תגי HTML לצורך הדגשה וגודל ---
+            body_content = f"""
 שלום,
 
 התקבל תמלול וסיכום משיחה נכנסת.
 
+<b>פרטי השיחה:</b>
 - מספר טלפון: {phone_number}
+- מזהה שיחה: {call_id}
 
------------------------------------
-תמלול ההקלטה האחרונה:
------------------------------------
+<hr>
+<h2>תמלול ההקלטה האחרונה:</h2>
 {recognized_text}
 
------------------------------------
-סיכום מלא:
------------------------------------
+<hr>
+<h2>סיכום מלא:</h2>
 {final_dvartorah_summary}
 
+<br><br>
+<b>--- תודה על השימוש בשירות! לפניות במייל: A0330356858@GMAIL.COM ---</b>
 """
             # 4. שליחת המייל
-            email_success = send_email(email_to, subject, body)
+            email_success = send_email(email_to, subject, body_content)
 
             if email_success:
                 logging.info(f"✅ Email sent. Returning success message to Yemot.")
-                return Response("id_list_message=t-ההודעה נשלחה בהצלחה למייל&**go_to_folder=/8/6", mimetype="text/plain")
+                return Response("id_list_message=t-ההודעה נשלחה בהצלחה למייל.go_to_folder=/8/6", mimetype="text/plain")
             else:
                 logging.error(f"❌ Email failed. Returning error message to Yemot.")
                 return Response("id_list_message=t-שגיאה בשליחת המייל, אנא נסה שוב.go_to_folder=/8/6", mimetype="text/plain")
