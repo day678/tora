@@ -522,12 +522,10 @@ def process_audio_for_email(request):
             final_dvartorah_summary = gemini_result.get("text", "לא נוצר סיכום.")
 
             # 3. הכנת תוכן המייל
-            subject = f"סיכום שיחה חדש מ: {phone_number}"
+            subject = f"סיכום שיחה חדש:"
             # --- בניית גוף ההודעה עם תגי HTML לצורך הדגשה וגודל ---
             body_content = f"""
-<b>פרטי השיחה:</b>
-- מספר טלפון: {phone_number}
-- מזהה שיחה: {call_id}
+
 
 <hr>
 <h2>תמלול ההקלטה האחרונה:</h2>
@@ -542,10 +540,10 @@ def process_audio_for_email(request):
 
             if email_success:
                 logging.info(f"✅ Email sent. Returning success message to Yemot.")
-                return Response("id_list_message=t-ההודעה נשלחה בהצלחה למייל.go_to_folder=/8/6", mimetype="text/plain")
+                return Response("id_list_message=t-ההודעה נשלחה בהצלחה למייל.go_to_folder=/", mimetype="text/plain")
             else:
                 logging.error(f"❌ Email failed. Returning error message to Yemot.")
-                return Response("id_list_message=t-שגיאה בשליחת המייל, אנא נסה שוב.go_to_folder=/8/6", mimetype="text/plain")
+                return Response("id_list_message=t-שגיאה בשליחת המייל, אנא נסה שוב.go_to_folder=/", mimetype="text/plain")
 
     except Exception as e:
         logging.error(f"Critical error in email processing: {e}")
