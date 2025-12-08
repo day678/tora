@@ -125,7 +125,93 @@ def apply_vowelized_lexicon(text: str) -> str:
     return f'<speak lang="he-IL">{processed_text}</speak>'
 
 
+# --- פונקציה חדשה לעיבוד ישיר של אודיו מול ג'מיני (Flash Lite) ---
+def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
+    if not GEMINI_API_KEY:
+        logging.error("Missing GEMINI_API_KEY")
+        return "שגיאה: חסר מפתח API."
+
+    # 1. קריאת קובץ האודיו וקידוד ל-Base64
+    try:
+        with open(audio_path, "rb") as f:
+            audio_data = f.read()
+        audio_b64 = base64.b64encode(audio_data).decode("utf-8")
+    except Exception as e:
+        logging.error(f"Error reading audio file: {e}")
+        return "שגיאה בקריאת קובץ השמע."
+
+    # 2. טעינת הנחיות והיסטוריה
+    instruction_text = load_instructions(instruction_file)
+    os.makedirs("/tmp/conversations", exist_ok=True)
+    history_path = f"/tmp/conversations/{phone_number}.json"
+    history = {"messages": [], "last_updated": time.time()}
+
+    context_parts = []
+    
+    # אם יש היסטוריה, נוסיף אותה כטקסט לפני האודיו הנוכחי
+    if remember_history and os.path.exists(history_path):
+        try:
+            with open(history_path, "r", encoding="utf-8") as f:
+                history = json.load(f)
+            # סינון הודעות ישנות (מעל שעה)
+            if time.time() - history.get("last_updated", 0) > 1 * 3600:
+                history = {"messages": [], "last_updated": time.time()}
+            
+            # הוספת ההיסטוריה כקונטקסט (רק תשובות המערכת הקודמות כי אין לנו את הטקסט של המשתמש כרגע)
+            if history["messages"]:
+                history_context = "היסטוריית השיחה עד כה (תשובות קודמות):\n" + "\n---\n".join(history["messages"])
+                context_parts.append({"text": history_context})
+        except Exception:
+            pass
+
+    # הוספת ההנחיה הראשית
+    context_parts.append({"text": f"{instruction_text}\n\nהנה ההודעה הקולית החדשה של המשתמש, ענה עליה בקצרה:"})
+    
+    # הוספת קובץ האודיו עצמו (Inline Data)
+    context_parts.append({
+        "inline_data": {
+            "mime_type": "audio/wav", 
+            "data": audio_b64
+        }
+    })
+
+    # 3. הכנת הבקשה ל-Gemini Flash Lite
+    payload = {
+        "contents": [{"parts": context_parts}],
+        # מודל מהיר וזול לאודיו
+        "generationConfig": {"temperature": 0.6, "max_output_tokens": 800}
+    }
+
+    # שימוש במודל Flash Lite Preview (הגרסה העדכנית המהירה ביותר)
+    API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite-preview-02-05:generateContent"
+    
+    for attempt in range(2):
+        try:
+            response = requests.post(f"{API_URL}?key={GEMINI_API_KEY}", json=payload, timeout=45)
+            response.raise_for_status()
+            data = response.json()
+            result_text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+            
+            if result_text:
+                # שמירה בהיסטוריה (שומרים את התשובה שלנו)
+                if remember_history:
+                    history["messages"].append(f"תשובה: {result_text}") # שומרים רק את התשובה כי אין לנו את הטקסט של המשתמש
+                    history["messages"] = history["messages"][-20:]
+                    history["last_updated"] = time.time()
+                    with open(history_path, "w", encoding="utf-8") as f:
+                        json.dump(history, f, ensure_ascii=False, indent=2)
+                
+                return result_text
+                
+        except Exception as e:
+            logging.error(f"Gemini Direct Audio API error (attempt {attempt+1}): {e}")
+            time.sleep(1)
+            
+    return "שגיאה בקבלת תשובה מהבינה המלאכותית."
+
+
 def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
+    # פונקציה זו נשארת עבור תהליך המייל שעדיין עובד עם טקסט (STT)
     if not text_to_summarize or not GEMINI_API_KEY:
         logging.warning("Skipping Gemini summarization: Missing text or API key.")
         return "שגיאה: לא ניתן לנסח דבר תורה."
@@ -158,7 +244,8 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
         "generationConfig": {"temperature": 0.6, "max_output_tokens": 2900}
     }
 
-    API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent"
+    # שימוש בגרסה הרגילה לטקסט
+    API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite-preview-02-05:generateContent"
     last_error = None
     for attempt in range(2):
         try:
@@ -419,37 +506,18 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_input:
             temp_input.write(response.content)
             temp_input.flush()
-            processed_audio = add_silence(temp_input.name)
-            recognized_text = recognize_speech(processed_audio)
-            if not recognized_text:
-                return Response("לא זוהה דיבור ברור. אנא נסה שוב.", mimetype="text/plain")
+            # מעבירים את הקובץ ישירות לג'מיני ללא המרה לטקסט וללא TTS
+            gemini_response_text = run_gemini_audio_direct(temp_input.name, phone_number, instruction_file, remember_history)
+            
+            # ניקוי הטקסט למניעת שבירת URL של ימות
+            safe_text = gemini_response_text.replace(":", "").replace('"', "").replace("\n", " ")
+            
+            # החזרת תשובה לימות המשיח להקראת הטקסט (t-)
+            # יתרון: מהירות שיא, אין עלויות TTS, אין העלאת קבצים
+            playback_command = f"id_list_message=t-{safe_text}&go_to_folder=/8/6"
+            logging.info(f"Returning IVR command: {playback_command}")
+            return Response(playback_command, mimetype="text/plain")
 
-            gemini_result = {}
-            def run_gemini():
-                gemini_result["text"] = summarize_with_gemini(recognized_text, phone_number, instruction_file, remember_history)
-            gemini_thread = threading.Thread(target=run_gemini)
-            gemini_thread.start()
-            gemini_thread.join()
-
-            final_dvartorah = gemini_result.get("text", recognized_text)
-            tts_path = synthesize_with_google_tts(final_dvartorah)
-
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            personal_folder = f"{BASE_YEMOT_FOLDER}/{phone_number}"
-            yemot_full_path = f"{personal_folder}/dvartorah_{timestamp}.wav"
-
-            # 🟩 קריאה לפונקציה שמוודאת שהתיקייה האישית קיימת ומוגדרת להשמעת קבצים
-            ensure_personal_folder_exists(phone_number)
-
-            upload_success = upload_to_yemot(tts_path, yemot_full_path)
-            os.remove(tts_path)
-
-            if upload_success:
-                playback_command = f"go_to_folder_and_play=/85/{phone_number},dvartorah_{timestamp}.wav,0.go_to_folder=/8/6"
-                logging.info(f"Returning IVR command: {playback_command}")
-                return Response(playback_command, mimetype="text/plain")
-            else:
-                return Response("שגיאה בהעלאת הקובץ לשרת.", mimetype="text/plain")
     except Exception as e:
         logging.error(f"Critical error: {e}")
         return Response(f"שגיאה קריטית בעיבוד: {e}", mimetype="text/plain")
@@ -471,6 +539,8 @@ def process_audio_for_email(request):
     """
     מבצע תמלול וסיכום, ושולח אותם במייל ללא הקראה.
     משתמש בהיסטוריה הקיימת לצורך הסיכום.
+    **הערה:** חלק זה נשאר עם הלוגיקה המקורית (STT + Gemini Text)
+    כי למייל אנחנו צריכים את התמלול הטקסטואלי המדויק.
     """
     file_url = request.args.get("file_url")
     call_id = request.args.get("ApiCallId", str(int(time.time())))
@@ -503,7 +573,7 @@ def process_audio_for_email(request):
             temp_input.flush()
             processed_audio = add_silence(temp_input.name)
             
-            # 1. ביצוע תמלול (STT)
+            # 1. ביצוע תמלול (STT) - נשאר למייל כדי שיהיה טקסט מקור
             recognized_text = recognize_speech(processed_audio)
             if not recognized_text:
                 return Response("לא זוהה דיבור ברור. אנא נסה שוב.", mimetype="text/plain")
@@ -562,4 +632,3 @@ def upload_audio_to_email():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
