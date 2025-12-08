@@ -110,7 +110,8 @@ def load_instructions(file_path: str) -> str:
 
 def clean_text_for_tts(text: str) -> str:
     text = re.sub(r'[A-Za-z*#@^_^~\[\]{}()<>+=_|\\\/]', '', text)
-    text = re.sub(r'[^\w\s,.!?אבגדהוזחטיכלמנסעפצקרשתםןףךץ]', '', text)
+    # כאן הסרנו תווים לא רצויים, אבל השארנו את הניקוד כי הוא חשוב ל-TTS ולבקשה שלך
+    text = re.sub(r'[^\w\s,.!?אבגדהוזחטיכלמנסעפצקרשתםןףךץ\u0591-\u05C7]', '', text)
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
@@ -164,8 +165,8 @@ def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file
         except Exception:
             pass
 
-    # הוספת ההנחיה הראשית
-    context_parts.append({"text": f"{instruction_text}\n\nהנה ההודעה הקולית החדשה של המשתמש, ענה עליה בקצרה:"})
+    # הוספת ההנחיה הראשית - עודכנה לבקשת הניקוד
+    context_parts.append({"text": f"{instruction_text}\n\nהנה ההודעה הקולית החדשה של המשתמש, ענה עליה בקצרה. חשוב מאוד: התשובה חייבת להיות מנוקדת ניקוד מלא!"})
     
     # הוספת קובץ האודיו עצמו (Inline Data)
     context_parts.append({
@@ -246,7 +247,8 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
         history = {"messages": [text_to_summarize], "last_updated": time.time()}
         context_text = text_to_summarize
 
-    prompt = f"{instruction_text}\n\nדברי התורה שנאמרו:\n{context_text}"
+    # הוספת הבקשה לניקוד גם כאן
+    prompt = f"{instruction_text}\n\nדברי התורה שנאמרו:\n{context_text}\n\nהנחיה חשובה: הפלט חייב להיות מנוקד ניקוד מלא."
 
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
