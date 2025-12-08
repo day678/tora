@@ -183,7 +183,7 @@ def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file
     }
 
     # שימוש במודל gemini-2.5-flash-lite כפי שביקשת
-    API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent"
+    API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
     
     # מנגנון Retry חכם לשגיאות 429
     for attempt in range(3):
