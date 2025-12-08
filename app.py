@@ -125,7 +125,7 @@ def apply_vowelized_lexicon(text: str) -> str:
     return f'<speak lang="he-IL">{processed_text}</speak>'
 
 
-# --- פונקציה חדשה לעיבוד ישיר של אודיו מול ג'מיני (Flash Lite) ---
+# --- פונקציה חדשה לעיבוד ישיר של אודיו מול ג'מיני (Direct Audio) ---
 def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
     if not GEMINI_API_KEY:
         logging.error("Missing GEMINI_API_KEY")
@@ -175,24 +175,24 @@ def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file
         }
     })
 
-    # 3. הכנת הבקשה ל-Gemini Flash Lite
+    # 3. הכנת הבקשה ל-Gemini
     payload = {
         "contents": [{"parts": context_parts}],
         # מודל מהיר וזול לאודיו
         "generationConfig": {"temperature": 0.6, "max_output_tokens": 800}
     }
 
-    # --- שינוי שם המודל לגרסה 2.5 ---
+    # שימוש במודל gemini-2.5-flash-lite כפי שביקשת
     API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent"
     
-    # --- שיפור: מנגנון Retry חכם יותר עבור שגיאות 429 ---
-    for attempt in range(3): # הגדלנו ל-3 ניסיונות
+    # מנגנון Retry חכם לשגיאות 429
+    for attempt in range(3):
         try:
-            response = requests.post(f"{API_URL}?key={GEMINI_API_KEY}", json=payload, timeout=60) # הגדלת Timeout ל-60 שניות
+            response = requests.post(f"{API_URL}?key={GEMINI_API_KEY}", json=payload, timeout=60)
             
             # טיפול ספציפי בעומס (429)
             if response.status_code == 429:
-                wait_time = 5 * (attempt + 1) # המתנה של 5, 10, 15 שניות
+                wait_time = 5 * (attempt + 1)
                 logging.warning(f"⚠️ Got 429 Too Many Requests. Sleeping for {wait_time} seconds before retry {attempt + 1}...")
                 time.sleep(wait_time)
                 continue
@@ -204,7 +204,7 @@ def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file
             if result_text:
                 # שמירה בהיסטוריה (שומרים את התשובה שלנו)
                 if remember_history:
-                    history["messages"].append(f"תשובה: {result_text}") # שומרים רק את התשובה כי אין לנו את הטקסט של המשתמש
+                    history["messages"].append(f"תשובה: {result_text}") # שומרים רק את התשובה
                     history["messages"] = history["messages"][-20:]
                     history["last_updated"] = time.time()
                     with open(history_path, "w", encoding="utf-8") as f:
@@ -214,7 +214,7 @@ def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file
                 
         except Exception as e:
             logging.error(f"Gemini Direct Audio API error (attempt {attempt+1}): {e}")
-            time.sleep(2) # השהייה קצרה לשגיאות רגילות
+            time.sleep(2) 
             
     return "שגיאה: עומס חריג בשרתי הבינה המלאכותית."
 
@@ -253,7 +253,7 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
         "generationConfig": {"temperature": 0.6, "max_output_tokens": 2900}
     }
 
-    # --- שינוי שם המודל לגרסה 2.5 ---
+    # שימוש בגרסה המעודכנת גם לטקסט
     API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent"
     
     for attempt in range(3):
@@ -278,7 +278,7 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
             logging.error(f"Gemini API error (attempt {attempt+1}): {e}")
             time.sleep(1)
             
-    return "שגיאה בעת ניסיון הסיכום."
+    return text_to_summarize # במקרה כשל, מחזיר את הטקסט המקורי
 
 
 def synthesize_with_google_tts(text: str) -> str:
@@ -522,18 +522,42 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_input:
             temp_input.write(response.content)
             temp_input.flush()
-            # מעבירים את הקובץ ישירות לג'מיני ללא המרה לטקסט וללא TTS
-            gemini_response_text = run_gemini_audio_direct(temp_input.name, phone_number, instruction_file, remember_history)
+            processed_audio = add_silence(temp_input.name)
             
-            # ניקוי הטקסט למניעת שבירת URL של ימות
-            safe_text = gemini_response_text.replace(":", "").replace('"', "").replace("\n", " ")
+            # כאן השינוי היחיד: דילוג על recognize_speech ושימוש בפונקציה הישירה
+            # recognized_text = recognize_speech(processed_audio) <-- מבוטל
             
-            # החזרת תשובה לימות המשיח להקראת הטקסט (t-)
-            # יתרון: מהירות שיא, אין עלויות TTS, אין העלאת קבצים
-            playback_command = f"id_list_message=t-{safe_text}&go_to_folder=/8/6"
-            logging.info(f"Returning IVR command: {playback_command}")
-            return Response(playback_command, mimetype="text/plain")
+            gemini_result_text = ""
+            def run_gemini():
+                nonlocal gemini_result_text
+                # שימוש בפונקציה החדשה שמקבלת את קובץ האודיו ישירות
+                gemini_result_text = run_gemini_audio_direct(temp_input.name, phone_number, instruction_file, remember_history)
+            
+            gemini_thread = threading.Thread(target=run_gemini)
+            gemini_thread.start()
+            gemini_thread.join()
 
+            final_dvartorah = gemini_result_text
+            
+            # מכאן זה ממשיך רגיל: יצירת קובץ שמע (TTS) והעלאה, כפי שביקשת
+            tts_path = synthesize_with_google_tts(final_dvartorah)
+
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            personal_folder = f"{BASE_YEMOT_FOLDER}/{phone_number}"
+            yemot_full_path = f"{personal_folder}/dvartorah_{timestamp}.wav"
+
+            # 🟩 קריאה לפונקציה שמוודאת שהתיקייה האישית קיימת ומוגדרת להשמעת קבצים
+            ensure_personal_folder_exists(phone_number)
+
+            upload_success = upload_to_yemot(tts_path, yemot_full_path)
+            os.remove(tts_path)
+
+            if upload_success:
+                playback_command = f"go_to_folder_and_play=/85/{phone_number},dvartorah_{timestamp}.wav,0.go_to_folder=/8/6"
+                logging.info(f"Returning IVR command: {playback_command}")
+                return Response(playback_command, mimetype="text/plain")
+            else:
+                return Response("שגיאה בהעלאת הקובץ לשרת.", mimetype="text/plain")
     except Exception as e:
         logging.error(f"Critical error: {e}")
         return Response(f"שגיאה קריטית בעיבוד: {e}", mimetype="text/plain")
