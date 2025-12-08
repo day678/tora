@@ -182,12 +182,21 @@ def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file
         "generationConfig": {"temperature": 0.6, "max_output_tokens": 800}
     }
 
-    # שימוש במודל Flash Lite Preview (הגרסה העדכנית המהירה ביותר)
-    API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite-preview-02-05:generateContent"
+    # --- שינוי שם המודל לגרסה 2.5 ---
+    API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent"
     
-    for attempt in range(2):
+    # --- שיפור: מנגנון Retry חכם יותר עבור שגיאות 429 ---
+    for attempt in range(3): # הגדלנו ל-3 ניסיונות
         try:
-            response = requests.post(f"{API_URL}?key={GEMINI_API_KEY}", json=payload, timeout=45)
+            response = requests.post(f"{API_URL}?key={GEMINI_API_KEY}", json=payload, timeout=60) # הגדלת Timeout ל-60 שניות
+            
+            # טיפול ספציפי בעומס (429)
+            if response.status_code == 429:
+                wait_time = 5 * (attempt + 1) # המתנה של 5, 10, 15 שניות
+                logging.warning(f"⚠️ Got 429 Too Many Requests. Sleeping for {wait_time} seconds before retry {attempt + 1}...")
+                time.sleep(wait_time)
+                continue
+                
             response.raise_for_status()
             data = response.json()
             result_text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
@@ -205,9 +214,9 @@ def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file
                 
         except Exception as e:
             logging.error(f"Gemini Direct Audio API error (attempt {attempt+1}): {e}")
-            time.sleep(1)
+            time.sleep(2) # השהייה קצרה לשגיאות רגילות
             
-    return "שגיאה בקבלת תשובה מהבינה המלאכותית."
+    return "שגיאה: עומס חריג בשרתי הבינה המלאכותית."
 
 
 def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
@@ -244,12 +253,19 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
         "generationConfig": {"temperature": 0.6, "max_output_tokens": 2900}
     }
 
-    # שימוש בגרסה הרגילה לטקסט
-    API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite-preview-02-05:generateContent"
-    last_error = None
-    for attempt in range(2):
+    # --- שינוי שם המודל לגרסה 2.5 ---
+    API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent"
+    
+    for attempt in range(3):
         try:
             response = requests.post(f"{API_URL}?key={GEMINI_API_KEY}", json=payload, timeout=35)
+            
+            if response.status_code == 429:
+                wait_time = 5 * (attempt + 1)
+                logging.warning(f"⚠️ Got 429 in Text Summary. Sleeping for {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+
             response.raise_for_status()
             data = response.json()
             result = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
@@ -260,9 +276,9 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
                 return result
         except Exception as e:
             logging.error(f"Gemini API error (attempt {attempt+1}): {e}")
-            last_error = e
             time.sleep(1)
-    return text_to_summarize if last_error else "שגיאה לא צפויה."
+            
+    return "שגיאה בעת ניסיון הסיכום."
 
 
 def synthesize_with_google_tts(text: str) -> str:
