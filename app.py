@@ -299,7 +299,9 @@ def synthesize_with_gemini_tts(text: str) -> str:
         # ההנחיה המבוקשת
         prompt = (
             f"Please read the following text in Hebrew clearly and slightly fast. "
-            f"The pronunciation must be in a 'Yeshivish' (ישיבתי) style: {final_text}"
+            f"The delivery must maintain a 'Yeshivish' (ישיבתי) pronunciation and tone, "
+            f"but with a focus on quick, **straightforward recitation** (קריאה ישרה) "
+            f"and **minimal dramatic intonation**: {final_text}"
         )
 
         response = model.generate_content(
@@ -309,7 +311,7 @@ def synthesize_with_gemini_tts(text: str) -> str:
                 "speech_config": {
                     "voice_config": {
                         "prebuilt_voice_config": {
-                            "voice_name": "Leda" # 👈 הקול שנבחר
+                            "voice_name": "Kore" # 👈 הקול שנבחר
                         }
                     }
                 }
