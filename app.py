@@ -311,7 +311,7 @@ def synthesize_with_gemini_tts(text: str) -> str:
                 "speech_config": {
                     "voice_config": {
                         "prebuilt_voice_config": {
-                            "voice_name": "Kore" # 👈 הקול שנבחר
+                            "voice_name": "Puck" # 👈 הקול שנבחר
                         }
                     }
                 }
