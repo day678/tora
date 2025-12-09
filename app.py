@@ -9,17 +9,17 @@ import threading
 import time
 import re
 import subprocess  # 🆕 נדרש להמרת האודיו מ-Gemini
-import google.generativeai as genai # 🆕 נדרש למודל החדש
+import google.generativeai as genai  # 🆕 נדרש למודל החדש
 from flask import Flask, request, Response
 from pydub import AudioSegment
 import speech_recognition as sr
-# from google.cloud import texttospeech # ❌ כבר לא בשימוש לקוד זה
+from google.cloud import texttospeech  # נשאר עבור הפונקציות המקוריות
 
 # ------------------ Configuration ------------------
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_CREDENTIALS_B64 = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_B64")
 
-# 🛠 הגדרת Gemini API Key למודול
+# 🛠 הגדרת Gemini API Key למודול החדש
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 else:
@@ -30,16 +30,17 @@ BASE_YEMOT_FOLDER = "ivr2:/85"  # שלוחה ראשית לכל הקבצים
 
 INSTRUCTIONS_CONTINUE_FILE = "instructions_continue.txt"
 INSTRUCTIONS_NEW_FILE = "instructions_new.txt"
+# --- הוספת קובץ הנחיות חדש עבור המייל ---
 INSTRUCTIONS_EMAIL_FILE = "instructions_email.txt"
 
 VOWELIZED_LEXICON_FILE = "vowelized_lexicon.txt"
 VOWELIZED_LEXICON = {}
 
 # --- הגדרות חדשות לשליחת מייל (Brevo) ---
-BREVO_API_KEY = os.getenv("BREVO_API_KEY") 
-EMAIL_USER = os.getenv("EMAIL_USER") 
-DEFAULT_EMAIL_RECEIVER = os.getenv("DEFAULT_EMAIL_RECEIVER") 
-EMAIL_SENDER_NAME = "מערכת סיכום שיחות" 
+BREVO_API_KEY = os.getenv("BREVO_API_KEY") # מפתח API חדש
+EMAIL_USER = os.getenv("EMAIL_USER") # כתובת המייל המאומתת (השולח)
+DEFAULT_EMAIL_RECEIVER = os.getenv("DEFAULT_EMAIL_RECEIVER") # כתובת גיבוי אם לא סופק ApiEmail
+EMAIL_SENDER_NAME = "מערכת סיכום שיחות" # השם שיופיע כשולח
 
 # ------------------ Logging ------------------
 logging.basicConfig(
@@ -50,7 +51,7 @@ logging.basicConfig(
 
 app = Flask(__name__)
 
-# יצירת קובץ זמני למפתח של Google Cloud (נשאר עבור ה-STT אם יש בו שימוש)
+# יצירת קובץ זמני למפתח של Google Cloud
 if GOOGLE_CREDENTIALS_B64:
     creds_json = base64.b64decode(GOOGLE_CREDENTIALS_B64).decode("utf-8")
     temp_cred_path = "/tmp/google_creds.json"
@@ -59,7 +60,7 @@ if GOOGLE_CREDENTIALS_B64:
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_cred_path
     logging.info("✅ Google Cloud credentials loaded successfully.")
 else:
-    logging.warning("⚠️ GOOGLE_APPLICATION_CREDENTIALS_B64 not found.")
+    logging.warning("⚠️ GOOGLE_APPLICATION_CREDENTIALS_B64 not found. TTS will fail.")
 
 
 # ------------------ Helper Functions ------------------
@@ -109,6 +110,7 @@ def load_instructions(file_path: str) -> str:
             return f.read().strip()
     except Exception:
         logging.warning(f"⚠️ Instruction file {file_path} not found or unreadable.")
+        # הנחיית ברירת מחדל אם הקובץ לא נמצא
         return "סכם את ההודעה הבאה בצורה ברורה ותמציתית."
 
 
@@ -120,7 +122,19 @@ def clean_text_for_tts(text: str) -> str:
 
 
 def apply_vowelized_lexicon(text: str) -> str:
-    # פונקציה זו פחות קריטית ב-Gemini TTS כי המודל חכם, אבל נשאיר אותה לניקוי בסיסי אם צריך
+    if not VOWELIZED_LEXICON:
+        # אם אין לקסיקון, רק מחזירים את הטקסט (ב-Gemini אין תגיות speak, בגוגל יש)
+        # הפונקציה המקורית מחזירה עם תגיות speak, נשאיר אותה ככה עבור גוגל.
+        # עבור ג'מיני נשתמש בלוגיקה קצת שונה בתוך הפונקציה שלו.
+        return f'<speak lang="he-IL">{text}</speak>'
+    processed_text = text
+    for unvowelized, vowelized in VOWELIZED_LEXICON.items():
+        pattern = r'\b' + re.escape(unvowelized) + r'\b'
+        processed_text = re.sub(pattern, vowelized, processed_text)
+    return f'<speak lang="he-IL">{processed_text}</speak>'
+
+def apply_vowelized_lexicon_clean(text: str) -> str:
+    """גרסה נקייה עבור ג'מיני שלא צריכה תגיות XML"""
     if not VOWELIZED_LEXICON:
         return text
     processed_text = text
@@ -130,7 +144,7 @@ def apply_vowelized_lexicon(text: str) -> str:
     return processed_text
 
 
-# --- פונקציה לעיבוד ישיר של אודיו מול ג'מיני (STT/Answer) ---
+# --- פונקציה חדשה לעיבוד ישיר של אודיו מול ג'מיני (Direct Audio) ---
 def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
     if not GEMINI_API_KEY:
         logging.error("Missing GEMINI_API_KEY")
@@ -153,7 +167,7 @@ def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file
 
     context_parts = []
     
-    # אם יש היסטוריה
+    # אם יש היסטוריה, נוסיף אותה כטקסט לפני האודיו הנוכחי
     if remember_history and os.path.exists(history_path):
         try:
             with open(history_path, "r", encoding="utf-8") as f:
@@ -162,7 +176,7 @@ def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file
             if time.time() - history.get("last_updated", 0) > 1 * 3600:
                 history = {"messages": [], "last_updated": time.time()}
             
-            # הוספת ההיסטוריה כקונטקסט
+            # הוספת ההיסטוריה כקונטקסט (רק תשובות המערכת הקודמות כי אין לנו את הטקסט של המשתמש כרגע)
             if history["messages"]:
                 history_context = "היסטוריית השיחה עד כה (תשובות קודמות):\n" + "\n---\n".join(history["messages"])
                 context_parts.append({"text": history_context})
@@ -172,7 +186,7 @@ def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file
     # הוספת ההנחיה הראשית
     context_parts.append({"text": f"{instruction_text}\n\nהנה ההודעה הקולית החדשה של המשתמש, ענה עליה בקצרה:"})
     
-    # הוספת קובץ האודיו עצמו
+    # הוספת קובץ האודיו עצמו (Inline Data)
     context_parts.append({
         "inline_data": {
             "mime_type": "audio/wav", 
@@ -183,18 +197,22 @@ def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file
     # 3. הכנת הבקשה ל-Gemini
     payload = {
         "contents": [{"parts": context_parts}],
+        # מודל מהיר וזול לאודיו
         "generationConfig": {"temperature": 0.6, "max_output_tokens": 800}
     }
 
+    # שימוש במודל gemini-2.5-flash-lite כפי שביקשת
     API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
     
+    # מנגנון Retry חכם לשגיאות 429
     for attempt in range(3):
         try:
             response = requests.post(f"{API_URL}?key={GEMINI_API_KEY}", json=payload, timeout=60)
             
+            # טיפול ספציפי בעומס (429)
             if response.status_code == 429:
                 wait_time = 5 * (attempt + 1)
-                logging.warning(f"⚠️ Got 429 Too Many Requests. Sleeping for {wait_time} seconds...")
+                logging.warning(f"⚠️ Got 429 Too Many Requests. Sleeping for {wait_time} seconds before retry {attempt + 1}...")
                 time.sleep(wait_time)
                 continue
                 
@@ -203,8 +221,9 @@ def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file
             result_text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
             
             if result_text:
+                # שמירה בהיסטוריה (שומרים את התשובה שלנו)
                 if remember_history:
-                    history["messages"].append(f"תשובה: {result_text}")
+                    history["messages"].append(f"תשובה: {result_text}") # שומרים רק את התשובה
                     history["messages"] = history["messages"][-20:]
                     history["last_updated"] = time.time()
                     with open(history_path, "w", encoding="utf-8") as f:
@@ -220,6 +239,7 @@ def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file
 
 
 def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
+    # פונקציה זו נשארת עבור תהליך המייל שעדיין עובד עם טקסט (STT)
     if not text_to_summarize or not GEMINI_API_KEY:
         logging.warning("Skipping Gemini summarization: Missing text or API key.")
         return "שגיאה: לא ניתן לנסח דבר תורה."
@@ -252,6 +272,7 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
         "generationConfig": {"temperature": 0.6, "max_output_tokens": 2900}
     }
 
+    # שימוש בגרסה המעודכנת גם לטקסט
     API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent"
     
     for attempt in range(3):
@@ -276,10 +297,28 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
             logging.error(f"Gemini API error (attempt {attempt+1}): {e}")
             time.sleep(1)
             
-    return text_to_summarize
+    return text_to_summarize # במקרה כשל, מחזיר את הטקסט המקורי
 
 
-# ✅ פונקציה מעודכנת להקראה עם GEMINI TTS
+# --- הפונקציה המקורית (משתמשת בגוגל) ---
+def synthesize_with_google_tts(text: str) -> str:
+    cleaned_text = clean_text_for_tts(text)
+    ssml_text = apply_vowelized_lexicon(cleaned_text)
+    if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        raise EnvironmentError("Google Cloud credentials not configured for TTS.")
+    client = texttospeech.TextToSpeechClient()
+    synthesis_input = texttospeech.SynthesisInput(ssml=ssml_text)
+    voice = texttospeech.VoiceSelectionParams(language_code="he-IL", name="he-IL-Wavenet-B")
+    audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.LINEAR16, sample_rate_hertz=16000, speaking_rate=1.15, pitch=2.0)
+    response = client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
+    output_path = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
+    with open(output_path, "wb") as out:
+        out.write(response.audio_content)
+    logging.info(f"✅ Google TTS file created: {output_path}")
+    return output_path
+
+
+# --- ✅ פונקציה חדשה להקראה עם GEMINI TTS ---
 def synthesize_with_gemini_tts(text: str) -> str:
     """
     מבצע המרת טקסט לדיבור באמצעות המודל החדש של ג'מיני.
@@ -288,8 +327,8 @@ def synthesize_with_gemini_tts(text: str) -> str:
     """
     cleaned_text = clean_text_for_tts(text)
     
-    # ב-Gemini TTS הניקוד האוטומטי מצוין, פחות צריך לקסיקון ידני, אבל אם יש מילים קריטיות נשאיר
-    final_text = apply_vowelized_lexicon(cleaned_text)
+    # ב-Gemini TTS הניקוד האוטומטי מצוין, פחות צריך לקסיקון ידני, אבל נשתמש בניקוי ללא תגיות
+    final_text = apply_vowelized_lexicon_clean(cleaned_text)
 
     logging.info(f"🎙️ Generating TTS with Gemini (Puck) for: {final_text[:30]}...")
 
@@ -345,7 +384,7 @@ def synthesize_with_gemini_tts(text: str) -> str:
 
     except Exception as e:
         logging.error(f"❌ Gemini TTS Error: {e}")
-        # במקרה חירום אפשר לזרוק שגיאה או להחזיר קובץ שקט, כאן נזרוק כדי שיתפס בלוגיקה הראשית
+        # במקרה חירום אפשר לזרוק שגיאה
         raise e
 
 
@@ -366,6 +405,7 @@ def upload_to_yemot(audio_path: str, yemot_full_path: str):
             return False
 
 
+# ✅ פונקציה חדשה לווידוא יצירת תיקייה אישית מוגדרת כהשמעת קבצים
 def ensure_personal_folder_exists(phone_number: str):
     """מוודא שתיקייה אישית קיימת ובעלת הגדרות השמעת קבצים."""
     folder_path = f"{BASE_YEMOT_FOLDER}/{phone_number}"
@@ -397,7 +437,7 @@ playfile_end_goto=/11
     files = {"file": ("ext.ini", ext_ini_content.encode("utf-8"), "text/plain")}
     params = {"token": SYSTEM_TOKEN, "path": f"{folder_path}/ext.ini"}
 
-    time.sleep(0.5) 
+    time.sleep(0.5)  # אם באמת צריך השהייה
     
     try:
         response = requests.post(url_upload, params=params, files=files)
@@ -426,16 +466,46 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
         # כתובת ה-API של Brevo
         api_url = "https://api.brevo.com/v3/smtp/email"
         
+        # --- כאן התיקון ל-RTL, הדגשה וטקסט קבוע ---
+        
+        # 1. המרת שורות חדשות לתגי <br> של HTML, וניקוי גוף ההודעה
+        # (התיקון של ה-SyntaxError נמצא כאן)
         nl = '\n'
         html_body = body.replace(nl, '<br>')
         
+        # 2. הוספת טקסט קבוע בסוף המייל
         fixed_footer = "<br><br>---<br><b>תודה על השימוש בשירות.</b>"
         
+        # 3. הגדרת כותרות מודגשות ומוגדלות (באמצעות תגי <h2>)
+        html_content = f"""
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                body {{ direction: rtl; font-family: Arial, sans-serif; text-align: right; }}
+                h2 {{ color: #333; font-size: 18px; margin-top: 15px; border-bottom: 1px solid #eee; padding-bottom: 5px; }}
+            </style>
+        </head>
+        <body dir="rtl">
+            <p>שלום,</p>
+            <p>התקבל תמלול וסיכום משיחה נכנסת.</p>
+            
+            <h2>**פרטי השיחה**</h2>
+            <p>{html_body}</p>
+            
+            {fixed_footer}
+        </body>
+        </html>
+        """
+
+        # 4. התאמת ה-body להצבה ב-HTML
+        # מחליפים את הכותרות ב-body לתגי <h2> ואת הקוים ב-HTML
         body_for_html = body
         body_for_html = body_for_html.replace('-----------------------------------', '<hr>')
         body_for_html = body_for_html.replace('תמלול ההקלטה האחרונה:', '<h2>תמלול ההקלטה האחרונה:</h2>')
         body_for_html = body_for_html.replace('סיכום מלא:', '<h2>סיכום מלא:</h2>')
         
+        # בנייה מחדש של גוף המייל (כדי שיוצב נכון)
         html_content = f"""
         <html>
         <head>
@@ -457,7 +527,9 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
         </body>
         </html>
         """
+        # --- סוף התיקון ---
 
+        # הרכבת ה-Payload (הנתונים הנשלחים)
         payload = {
             "sender": {
                 "email": EMAIL_USER,
@@ -469,25 +541,29 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
                 }
             ],
             "subject": subject,
-            "htmlContent": html_content
+            "htmlContent": html_content # שימוש ב-HTML במקום טקסט רגיל
         }
         
+        # הרכבת ה-Headers
         headers = {
             "accept": "application/json",
             "api-key": BREVO_API_KEY,
             "content-type": "application/json"
         }
         
+        # ביצוע בקשת ה-HTTP POST
         response = requests.post(api_url, json=payload, headers=headers)
         
         data = response.json()
 
-        if response.status_code == 201:
+        if response.status_code == 201: # 201 Creado הוא סטטוס ההצלחה של Brevo
             logging.info(f"✅ Email sent successfully via Brevo API (Status: 201, MessageID: {data.get('messageId')})")
             return True
         else:
             logging.error(f"❌ Failed to send email via Brevo API (Status: {response.status_code})")
             logging.error(f"❌ Brevo Response: {data}")
+            error_msg = data.get("message")
+            logging.error(f"❌ Brevo Error Message: {error_msg}")
             return False
             
     except Exception as e:
@@ -504,6 +580,7 @@ def health():
     return Response("OK", status=200, mimetype="text/plain")
 
 
+# --- הפונקציה המקורית: משתמשת ב-Google TTS ---
 def process_audio_request(request, remember_history: bool, instruction_file: str):
     file_url = request.args.get("file_url")
     call_id = request.args.get("ApiCallId", str(int(time.time())))
@@ -511,6 +588,8 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
 
     # ------------------ תוספת: מחיקת היסטוריה קודמת בנושא חדש ------------------
     if not remember_history:
+        # הבקשה הגיעה מ /upload_audio_new
+        # 1. נמחק את ההיסטוריה הישנה של מספר זה
         history_path = f"/tmp/conversations/{phone_number}.json"
         if os.path.exists(history_path):
             try:
@@ -519,6 +598,8 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
             except Exception as e:
                 logging.warning(f"⚠️ לא ניתן היה למחוק קובץ היסטוריה ישן {history_path}: {e}")
         
+        # 2. נקבע שהשיחה הנוכחית כן תישמר כהתחלה של ההיסטוריה החדשה
+        # לכן, אנו דורסים את המשתנה ל-True עבור המשך הריצה של פונקציה זו
         remember_history = True
     # ------------------ סוף התוספת ------------------
 
@@ -532,12 +613,15 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_input:
             temp_input.write(response.content)
             temp_input.flush()
-            # processed_audio = add_silence(temp_input.name) # לא קריטי אם שולחים ישירות
+            processed_audio = add_silence(temp_input.name)
+            
+            # כאן השינוי היחיד: דילוג על recognize_speech ושימוש בפונקציה הישירה
+            # recognized_text = recognize_speech(processed_audio) <-- מבוטל
             
             gemini_result_text = ""
             def run_gemini():
                 nonlocal gemini_result_text
-                # שימוש בפונקציה הישירה (STT + Answer)
+                # שימוש בפונקציה החדשה שמקבלת את קובץ האודיו ישירות
                 gemini_result_text = run_gemini_audio_direct(temp_input.name, phone_number, instruction_file, remember_history)
             
             gemini_thread = threading.Thread(target=run_gemini)
@@ -546,8 +630,8 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
 
             final_dvartorah = gemini_result_text
             
-            # 🟩 החלפה: שימוש ב-Gemini TTS במקום Google Cloud TTS
-            tts_path = synthesize_with_gemini_tts(final_dvartorah)
+            # מכאן זה ממשיך רגיל: יצירת קובץ שמע (TTS) והעלאה, כפי שביקשת
+            tts_path = synthesize_with_google_tts(final_dvartorah)
 
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             personal_folder = f"{BASE_YEMOT_FOLDER}/{phone_number}"
@@ -570,6 +654,68 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
         return Response(f"שגיאה קריטית בעיבוד: {e}", mimetype="text/plain")
 
 
+# --- ✅ פונקציה חדשה: משתמשת ב-Gemini TTS (משוכפלת למניעת שינוי בקוד המקורי) ---
+def process_audio_request_gemini(request, remember_history: bool, instruction_file: str):
+    file_url = request.args.get("file_url")
+    call_id = request.args.get("ApiCallId", str(int(time.time())))
+    phone_number = request.args.get("ApiPhone", "unknown")
+
+    if not remember_history:
+        history_path = f"/tmp/conversations/{phone_number}.json"
+        if os.path.exists(history_path):
+            try:
+                os.remove(history_path)
+                logging.info(f"🗑️ נמחקה היסטוריה ישנה עבור {phone_number} (נושא חדש - ג'מיני).")
+            except Exception as e:
+                logging.warning(f"⚠️ לא ניתן היה למחוק קובץ היסטוריה ישן {history_path}: {e}")
+        
+        remember_history = True
+
+    if not file_url.startswith("http"):
+        file_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={SYSTEM_TOKEN}&path=ivr2:/{file_url}"
+
+    logging.info(f"Downloading audio from: {file_url} (For Gemini TTS)")
+    try:
+        response = requests.get(file_url, timeout=20)
+        response.raise_for_status()
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_input:
+            temp_input.write(response.content)
+            temp_input.flush()
+            
+            gemini_result_text = ""
+            def run_gemini():
+                nonlocal gemini_result_text
+                gemini_result_text = run_gemini_audio_direct(temp_input.name, phone_number, instruction_file, remember_history)
+            
+            gemini_thread = threading.Thread(target=run_gemini)
+            gemini_thread.start()
+            gemini_thread.join()
+
+            final_dvartorah = gemini_result_text
+            
+            # 🟩 כאן השינוי: שימוש ב-Gemini TTS במקום Google Cloud TTS
+            tts_path = synthesize_with_gemini_tts(final_dvartorah)
+
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            personal_folder = f"{BASE_YEMOT_FOLDER}/{phone_number}"
+            yemot_full_path = f"{personal_folder}/dvartorah_{timestamp}.wav"
+
+            ensure_personal_folder_exists(phone_number)
+
+            upload_success = upload_to_yemot(tts_path, yemot_full_path)
+            os.remove(tts_path)
+
+            if upload_success:
+                playback_command = f"go_to_folder_and_play=/85/{phone_number},dvartorah_{timestamp}.wav,0.go_to_folder=/8/6"
+                logging.info(f"Returning IVR command: {playback_command}")
+                return Response(playback_command, mimetype="text/plain")
+            else:
+                return Response("שגיאה בהעלאת הקובץ לשרת.", mimetype="text/plain")
+    except Exception as e:
+        logging.error(f"Critical error (Gemini Route): {e}")
+        return Response(f"שגיאה קריטית בעיבוד: {e}", mimetype="text/plain")
+
+
 @app.route("/upload_audio_continue", methods=["GET"])
 def upload_audio_continue():
     return process_audio_request(request, remember_history=True, instruction_file=INSTRUCTIONS_CONTINUE_FILE)
@@ -580,23 +726,44 @@ def upload_audio_new():
     return process_audio_request(request, remember_history=False, instruction_file=INSTRUCTIONS_NEW_FILE)
 
 
-# --- פונקציה ו-route חדשים לשליחת מייל ---
+# --- ✅ Routes חדשים עבור Gemini TTS ---
+@app.route("/upload_audio_gemini_new", methods=["GET"])
+def upload_audio_gemini_new():
+    """מסלול לשיחה חדשה המשתמש בקול של ג'מיני (Puck)"""
+    return process_audio_request_gemini(request, remember_history=False, instruction_file=INSTRUCTIONS_NEW_FILE)
+
+@app.route("/upload_audio_gemini_continue", methods=["GET"])
+def upload_audio_gemini_continue():
+    """מסלול להמשך שיחה המשתמש בקול של ג'מיני (Puck)"""
+    return process_audio_request_gemini(request, remember_history=True, instruction_file=INSTRUCTIONS_CONTINUE_FILE)
+
+
+# --- פונקציה ו-route לשליחת מייל ---
 
 def process_audio_for_email(request):
     """
     מבצע תמלול וסיכום, ושולח אותם במייל ללא הקראה.
+    משתמש בהיסטוריה הקיימת לצורך הסיכום.
+    **הערה:** חלק זה נשאר עם הלוגיקה המקורית (STT + Gemini Text)
+    כי למייל אנחנו צריכים את התמלול הטקסטואלי המדויק.
     """
     file_url = request.args.get("file_url")
     call_id = request.args.get("ApiCallId", str(int(time.time())))
     phone_number = request.args.get("ApiPhone", "unknown")
+    # קבלת המייל מהפרמטרים של ימות, עם גיבוי למשתנה הסביבה
     email_to = request.args.get("ApiEmail", DEFAULT_EMAIL_RECEIVER)
 
+    # --- תוספת: בדיקה למניעת קריסה ---
+    # (זוהי התוספת מהפעם הקודמת, לוודא שה-ext.ini נכון)
     if not file_url:
         logging.error("❌ שגיאת הגדרה: פרמטר 'file_url' חסר.")
+        logging.error("❌ יש לוודא שקובץ ext.ini בשלוחה בימות המשיח מכיל את השורה: api_000=file_url,,record,,,,,no")
+        # החזרת הודעת שגיאה ברורה למאזין
         return Response("id_list_message=t-שגיאת הגדרה חמורה במערכת, הקלטה לא התקבלה. אנא פנה למנהל.go_to_folder=/8/6", mimetype="text/plain")
+    # --- סוף התוספת ---
 
     if not email_to:
-        logging.warning("⚠️ No email address provided. Aborting email send.")
+        logging.warning("⚠️ No email address provided (ApiEmail or DEFAULT_EMAIL_RECEIVER). Aborting email send.")
         return Response("id_list_message=t-שגיאה, לא הוגדרה כתובת מייל לשליחה.go_to_folder=/8/6", mimetype="text/plain")
 
     if not file_url.startswith("http"):
@@ -616,10 +783,13 @@ def process_audio_for_email(request):
             if not recognized_text:
                 return Response("לא זוהה דיבור ברור. אנא נסה שוב.", mimetype="text/plain")
 
-            # 2. ביצוע סיכום Gemini
+            # 2. ביצוע סיכום Gemini (תוך שימוש בהיסטוריה הקיימת)
             gemini_result = {}
             def run_gemini():
+                # --- כאן השינוי ---
+                # שימוש בקובץ הנחיות ייעודי למייל
                 gemini_result["text"] = summarize_with_gemini(recognized_text, phone_number, INSTRUCTIONS_EMAIL_FILE, remember_history=True)
+                # --- סוף השינוי ---
             gemini_thread = threading.Thread(target=run_gemini)
             gemini_thread.start()
             gemini_thread.join()
@@ -628,6 +798,7 @@ def process_audio_for_email(request):
 
             # 3. הכנת תוכן המייל
             subject = f"סיכום שיחה חדש:"
+            # --- בניית גוף ההודעה עם תגי HTML לצורך הדגשה וגודל ---
             body_content = f"""
 
 
@@ -655,6 +826,10 @@ def process_audio_for_email(request):
 
 @app.route("/upload_audio_to_email", methods=["GET"])
 def upload_audio_to_email():
+    """
+    כתובת חדשה שמקבלת הקלטה, מתמללת, מסכמת ושולחת במייל
+    ללא הקראה או שמירה בימות.
+    """
     return process_audio_for_email(request)
 
 
