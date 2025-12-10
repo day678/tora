@@ -788,7 +788,7 @@ def process_audio_for_email(request):
             def run_gemini():
                 # --- כאן השינוי ---
                 # שימוש בקובץ הנחיות ייעודי למייל
-                gemini_result["text"] = summarize_with_gemini(recognized_text, phone_number, INSTRUCTIONS_EMAIL_FILE, remember_history=True)
+                gemini_result["text"] = summarize_with_gemini(recognized_text, phone_number, INSTRUCTIONS_EMAIL_FILE, remember_history=False)
                 # --- סוף השינוי ---
             gemini_thread = threading.Thread(target=run_gemini)
             gemini_thread.start()
