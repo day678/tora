@@ -19,6 +19,9 @@ from google.cloud import texttospeech  # נשאר עבור הפונקציות ה
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_CREDENTIALS_B64 = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_B64")
 
+# סף רעש מינימלי (בדציבלים). אם הקובץ שקט מזה, הוא ייחשב כשקט מדי.
+MIN_AUDIO_DBFS = -45.0 
+
 # 🛠 הגדרת Gemini API Key למודול החדש
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
@@ -86,6 +89,21 @@ def add_silence(input_path: str) -> AudioSegment:
     silence = AudioSegment.silent(duration=1000)
     return silence + audio + silence
 
+# ✅ פונקציה חדשה לבדיקת עוצמת השמע
+def is_audio_quiet(file_path: str) -> bool:
+    """בודק אם קובץ האודיו שקט מדי (מתחת לסף שהוגדר)."""
+    try:
+        audio = AudioSegment.from_file(file_path)
+        logging.info(f"🎤 Audio max dBFS: {audio.max_dBFS}")
+        # בדיקה אם העוצמה המקסימלית נמוכה מהסף (למשל -45)
+        if audio.max_dBFS < MIN_AUDIO_DBFS:
+            return True
+        return False
+    except Exception as e:
+        logging.error(f"⚠️ Error checking audio volume: {e}")
+        # במקרה של שגיאה בבדיקה, נעדיף לא לחסום סתם, נחזיר שהקובץ תקין
+        return False
+
 
 def recognize_speech(audio_segment: AudioSegment) -> str:
     recognizer = sr.Recognizer()
@@ -124,8 +142,6 @@ def clean_text_for_tts(text: str) -> str:
 def apply_vowelized_lexicon(text: str) -> str:
     if not VOWELIZED_LEXICON:
         # אם אין לקסיקון, רק מחזירים את הטקסט (ב-Gemini אין תגיות speak, בגוגל יש)
-        # הפונקציה המקורית מחזירה עם תגיות speak, נשאיר אותה ככה עבור גוגל.
-        # עבור ג'מיני נשתמש בלוגיקה קצת שונה בתוך הפונקציה שלו.
         return f'<speak lang="he-IL">{text}</speak>'
     processed_text = text
     for unvowelized, vowelized in VOWELIZED_LEXICON.items():
@@ -144,7 +160,7 @@ def apply_vowelized_lexicon_clean(text: str) -> str:
     return processed_text
 
 
-# --- פונקציה חדשה לעיבוד ישיר של אודיו מול ג'מיני (Direct Audio) ---
+# --- פונקציה לעיבוד ישיר של אודיו מול ג'מיני (Direct Audio) ---
 def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
     if not GEMINI_API_KEY:
         logging.error("Missing GEMINI_API_KEY")
@@ -405,6 +421,64 @@ def upload_to_yemot(audio_path: str, yemot_full_path: str):
             return False
 
 
+# --- ✅ פונקציה חדשה לעדכון קובץ playfile.ini ---
+def update_playfile_ini(phone_number: str):
+    """
+    יוצרת ומעדכנת את קובץ playfile.ini בתיקיית המשתמש.
+    זה מאפשר השמעת קבצים רציפה גם כשיש להם שמות טקסטואליים.
+    הפונקציה סורקת את הקבצים, ממיינת מהחדש לישן ויוצרת מיפוי (001, 002...).
+    """
+    folder_path = f"{BASE_YEMOT_FOLDER}/{phone_number}"
+    url_get_files = "https://www.call2all.co.il/ym/api/GetFiles"
+    url_upload = "https://www.call2all.co.il/ym/api/UploadFile"
+
+    try:
+        # 1. קבלת רשימת הקבצים הקיימים בתיקייה
+        response = requests.get(url_get_files, params={"token": SYSTEM_TOKEN, "path": folder_path})
+        data = response.json()
+        
+        if data.get("responseStatus") != "OK":
+            logging.warning(f"⚠️ Failed to get files from {folder_path}: {data}")
+            return
+
+        files_list = []
+        if "files" in data:
+            for file_info in data["files"]:
+                file_name = file_info.get("name", "")
+                # מסננים רק קבצי wav שאינם קבצי מערכת/הגדרות
+                if file_name.endswith(".wav") and not file_name.startswith("ext") and not file_name.startswith("playfile"):
+                    files_list.append(file_name)
+
+        # מיון הקבצים מהחדש לישן (ההנחה: שמות הקבצים כוללים תאריך בפורמט YYYYMMDD)
+        # כך הקובץ האחרון שנוצר (התשובה הנוכחית) יהיה תמיד 001
+        files_list.sort(reverse=True)
+
+        # 2. יצירת תוכן קובץ playfile.ini
+        # הפורמט: 001=filename1.wav, 002=filename2.wav וכו'
+        ini_content = ""
+        for index, file_name in enumerate(files_list):
+            ini_content += f"{index + 1:03d}={file_name}\n"
+
+        if not ini_content:
+            logging.info("ℹ️ No wav files found to index in playfile.ini")
+            return
+
+        # 3. העלאת הקובץ המעודכן לשרת
+        files = {"file": ("playfile.ini", ini_content.encode("utf-8"), "text/plain")}
+        params = {"token": SYSTEM_TOKEN, "path": f"{folder_path}/playfile.ini"}
+        
+        upload_response = requests.post(url_upload, params=params, files=files)
+        upload_data = upload_response.json()
+        
+        if upload_data.get("responseStatus") == "OK":
+            logging.info(f"✅ Successfully updated playfile.ini in {folder_path}")
+        else:
+            logging.error(f"❌ Failed to update playfile.ini: {upload_data}")
+
+    except Exception as e:
+        logging.error(f"❌ Error updating playfile.ini: {e}")
+
+
 # ✅ פונקציה חדשה לווידוא יצירת תיקייה אישית מוגדרת כהשמעת קבצים
 def ensure_personal_folder_exists(phone_number: str):
     """מוודא שתיקייה אישית קיימת ובעלת הגדרות השמעת קבצים."""
@@ -476,14 +550,14 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
         # 2. הוספת טקסט קבוע בסוף המייל
         fixed_footer = "<br><br>---<br><b>תודה על השימוש בשירות.</b>"
         
-        # 3. הגדרת כותרות מודגשות ומוגדלות (באמצעות תגי <h2>)
+        # 3. הגדרת כותרות מודגשות ומוגדלות (באמצעות תגי <h2>) (שינוי גודל גופן)
         html_content = f"""
         <html>
         <head>
             <meta charset="UTF-8">
             <style>
-                body {{ direction: rtl; font-family: Arial, sans-serif; text-align: right; }}
-                h2 {{ color: #333; font-size: 18px; margin-top: 15px; border-bottom: 1px solid #eee; padding-bottom: 5px; }}
+                body {{ direction: rtl; font-family: Arial, sans-serif; text-align: right; font-size: 16px; }}
+                h2 {{ color: #333; font-size: 20px; margin-top: 15px; border-bottom: 1px solid #eee; padding-bottom: 5px; }}
             </style>
         </head>
         <body dir="rtl">
@@ -505,14 +579,14 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
         body_for_html = body_for_html.replace('תמלול ההקלטה האחרונה:', '<h2>תמלול ההקלטה האחרונה:</h2>')
         body_for_html = body_for_html.replace('סיכום מלא:', '<h2>סיכום מלא:</h2>')
         
-        # בנייה מחדש של גוף המייל (כדי שיוצב נכון)
+        # בנייה מחדש של גוף המייל (כדי שיוצב נכון) (שינוי גודל גופן)
         html_content = f"""
         <html>
         <head>
             <meta charset="UTF-8">
             <style>
-                body {{ direction: rtl; font-family: Arial, sans-serif; text-align: right; }}
-                h2 {{ color: #004d99; font-size: 18px; margin-top: 20px; border-bottom: 1px solid #eee; padding-bottom: 5px; }}
+                body {{ direction: rtl; font-family: Arial, sans-serif; text-align: right; font-size: 16px; }}
+                h2 {{ color: #004d99; font-size: 20px; margin-top: 20px; border-bottom: 1px solid #eee; padding-bottom: 5px; }}
                 b {{ font-weight: bold; }}
             </style>
         </head>
@@ -613,6 +687,12 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_input:
             temp_input.write(response.content)
             temp_input.flush()
+            
+            # ✅ בדיקת שקט (Silence Check)
+            if is_audio_quiet(temp_input.name):
+                logging.info("🔇 Audio is too quiet. Returning warning to user.")
+                return Response("id_list_message=t-הקובץ שקט מדי, אנא נסו להקליט שוב&go_to_folder=/8/6", mimetype="text/plain")
+
             processed_audio = add_silence(temp_input.name)
             
             # כאן השינוי היחיד: דילוג על recognize_speech ושימוש בפונקציה הישירה
@@ -644,6 +724,9 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
             os.remove(tts_path)
 
             if upload_success:
+                # עדכון קובץ ה-ini עבור רציפות השמעה
+                update_playfile_ini(phone_number)
+                
                 playback_command = f"go_to_folder_and_play=/85/{phone_number},dvartorah_{timestamp}.wav,0.go_to_folder=/8/6"
                 logging.info(f"Returning IVR command: {playback_command}")
                 return Response(playback_command, mimetype="text/plain")
@@ -682,6 +765,11 @@ def process_audio_request_gemini(request, remember_history: bool, instruction_fi
             temp_input.write(response.content)
             temp_input.flush()
             
+            # ✅ בדיקת שקט (Silence Check) - גם כאן
+            if is_audio_quiet(temp_input.name):
+                logging.info("🔇 Audio is too quiet. Returning warning to user.")
+                return Response("id_list_message=t-הקובץ שקט מדי, אנא נסו להקליט שוב&go_to_folder=/8/6", mimetype="text/plain")
+
             gemini_result_text = ""
             def run_gemini():
                 nonlocal gemini_result_text
@@ -706,6 +794,9 @@ def process_audio_request_gemini(request, remember_history: bool, instruction_fi
             os.remove(tts_path)
 
             if upload_success:
+                # עדכון קובץ ה-ini עבור רציפות השמעה
+                update_playfile_ini(phone_number)
+                
                 playback_command = f"go_to_folder_and_play=/85/{phone_number},dvartorah_{timestamp}.wav,0.go_to_folder=/8/6"
                 logging.info(f"Returning IVR command: {playback_command}")
                 return Response(playback_command, mimetype="text/plain")
@@ -743,27 +834,18 @@ def upload_audio_gemini_continue():
 def process_audio_for_email(request):
     """
     מבצע תמלול וסיכום, ושולח אותם במייל ללא הקראה.
-    משתמש בהיסטוריה הקיימת לצורך הסיכום.
-    **הערה:** חלק זה נשאר עם הלוגיקה המקורית (STT + Gemini Text)
-    כי למייל אנחנו צריכים את התמלול הטקסטואלי המדויק.
     """
     file_url = request.args.get("file_url")
     call_id = request.args.get("ApiCallId", str(int(time.time())))
     phone_number = request.args.get("ApiPhone", "unknown")
-    # קבלת המייל מהפרמטרים של ימות, עם גיבוי למשתנה הסביבה
     email_to = request.args.get("ApiEmail", DEFAULT_EMAIL_RECEIVER)
 
-    # --- תוספת: בדיקה למניעת קריסה ---
-    # (זוהי התוספת מהפעם הקודמת, לוודא שה-ext.ini נכון)
     if not file_url:
         logging.error("❌ שגיאת הגדרה: פרמטר 'file_url' חסר.")
-        logging.error("❌ יש לוודא שקובץ ext.ini בשלוחה בימות המשיח מכיל את השורה: api_000=file_url,,record,,,,,no")
-        # החזרת הודעת שגיאה ברורה למאזין
         return Response("id_list_message=t-שגיאת הגדרה חמורה במערכת, הקלטה לא התקבלה. אנא פנה למנהל.go_to_folder=/8/6", mimetype="text/plain")
-    # --- סוף התוספת ---
 
     if not email_to:
-        logging.warning("⚠️ No email address provided (ApiEmail or DEFAULT_EMAIL_RECEIVER). Aborting email send.")
+        logging.warning("⚠️ No email address provided. Aborting email send.")
         return Response("id_list_message=t-שגיאה, לא הוגדרה כתובת מייל לשליחה.go_to_folder=/8/6", mimetype="text/plain")
 
     if not file_url.startswith("http"):
@@ -776,6 +858,12 @@ def process_audio_for_email(request):
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_input:
             temp_input.write(response.content)
             temp_input.flush()
+            
+            # ✅ בדיקת שקט (Silence Check) - גם במייל
+            if is_audio_quiet(temp_input.name):
+                logging.info("🔇 Audio is too quiet. Aborting email send.")
+                return Response("id_list_message=t-הקובץ שקט מדי, אנא נסו להקליט שוב&go_to_folder=/8/6", mimetype="text/plain")
+
             processed_audio = add_silence(temp_input.name)
             
             # 1. ביצוע תמלול (STT) - נשאר למייל כדי שיהיה טקסט מקור
