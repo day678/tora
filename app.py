@@ -701,9 +701,28 @@ def update_email():
         new_email = new_email.strip()
         save_user_email(phone, new_email)
         # החזרת תשובה לימות: השמעה ומעבר
-        return Response("id_list_message=t-המייל עודכן בהצלחה במערכת&go_to_folder=/8", mimetype="text/plain")
+        return Response("id_list_message=t-המייל עודכן בהצלחה במערכת&go_to_folder=/7", mimetype="text/plain")
     
-    return Response("id_list_message=t-אירעה שגיאה בקליטת המייל&go_to_folder=/8", mimetype="text/plain")
+    return Response("id_list_message=t-אירעה שגיאה בקליטת המייל&go_to_folder=/7", mimetype="text/plain")
+
+
+# --- 🆕 Route לבדיקת קיום מייל לפני הקלטה ---
+@app.route("/check_email_exists", methods=["GET"])
+def check_email_exists():
+    phone = request.args.get("ApiPhone")
+    email = get_user_email(phone)
+
+    # נניח שתיקיית ההקלטה היא 9715 (לפי השיחה הקודמת)
+    RECORDING_FOLDER = "/7"
+    # נניח שתיקיית הגדרת המייל היא 8
+    EMAIL_SETUP_FOLDER = "/6"
+
+    if email:
+        # יש מייל - העבר לתיקיית ההקלטה
+        return Response(f"go_to_folder={RECORDING_FOLDER}", mimetype="text/plain")
+    else:
+        # אין מייל - השמע הודעה והעבר להגדרה
+        return Response(f"id_list_message=t-לא מוגדרת כתובת מייל עבור הטלפון שלכם. הנכם מועברים להגדרת הכתובת.&go_to_folder={EMAIL_SETUP_FOLDER}", mimetype="text/plain")
 
 
 # --- הפונקציה המקורית: משתמשת ב-Google TTS ---
