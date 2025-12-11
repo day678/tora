@@ -22,6 +22,9 @@ GOOGLE_CREDENTIALS_B64 = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_B64")
 # סף רעש מינימלי (בדציבלים). אם הקובץ שקט מזה, הוא ייחשב כשקט מדי.
 MIN_AUDIO_DBFS = -45.0 
 
+# קובץ לשמירת מיילים של משתמשים
+USERS_EMAILS_FILE = "users_emails.json"
+
 # 🛠 הגדרת Gemini API Key למודול החדש
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
@@ -89,7 +92,7 @@ def add_silence(input_path: str) -> AudioSegment:
     silence = AudioSegment.silent(duration=1000)
     return silence + audio + silence
 
-# ✅ פונקציה חדשה לבדיקת עוצמת השמע
+# ✅ פונקציה לבדיקת עוצמת השמע
 def is_audio_quiet(file_path: str) -> bool:
     """בודק אם קובץ האודיו שקט מדי (מתחת לסף שהוגדר)."""
     try:
@@ -158,6 +161,38 @@ def apply_vowelized_lexicon_clean(text: str) -> str:
         pattern = r'\b' + re.escape(unvowelized) + r'\b'
         processed_text = re.sub(pattern, vowelized, processed_text)
     return processed_text
+
+
+# --- 🆕 ניהול משתמשים ומיילים ---
+def save_user_email(phone, email):
+    """שומר את המייל של המשתמש בקובץ JSON."""
+    data = {}
+    if os.path.exists(USERS_EMAILS_FILE):
+        try:
+            with open(USERS_EMAILS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            logging.error(f"Error reading email file: {e}")
+            
+    data[phone] = email
+    
+    try:
+        with open(USERS_EMAILS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logging.info(f"📧 Saved email for {phone}: {email}")
+    except Exception as e:
+        logging.error(f"Error saving email file: {e}")
+
+def get_user_email(phone):
+    """מחזיר את המייל השמור של המשתמש, או None אם לא קיים."""
+    if os.path.exists(USERS_EMAILS_FILE):
+        try:
+            with open(USERS_EMAILS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get(phone)
+        except Exception:
+            return None
+    return None
 
 
 # --- פונקציה לעיבוד ישיר של אודיו מול ג'מיני (Direct Audio) ---
@@ -654,6 +689,23 @@ def health():
     return Response("OK", status=200, mimetype="text/plain")
 
 
+# --- 🆕 Route לעדכון מייל ע"י המשתמש (עבור שלוחה ייעודית) ---
+@app.route("/update_email", methods=["GET"])
+def update_email():
+    phone = request.args.get("ApiPhone")
+    # בימות המשיח מגדירים שהקלט ייכנס למשתנה בשם USER_EMAIL
+    new_email = request.args.get("USER_EMAIL")
+    
+    if phone and new_email:
+        # ניקוי המייל מתווים לא רצויים
+        new_email = new_email.strip()
+        save_user_email(phone, new_email)
+        # החזרת תשובה לימות: השמעה ומעבר
+        return Response("id_list_message=t-המייל עודכן בהצלחה במערכת&go_to_folder=/8", mimetype="text/plain")
+    
+    return Response("id_list_message=t-אירעה שגיאה בקליטת המייל&go_to_folder=/8", mimetype="text/plain")
+
+
 # --- הפונקציה המקורית: משתמשת ב-Google TTS ---
 def process_audio_request(request, remember_history: bool, instruction_file: str):
     file_url = request.args.get("file_url")
@@ -838,11 +890,21 @@ def process_audio_for_email(request):
     file_url = request.args.get("file_url")
     call_id = request.args.get("ApiCallId", str(int(time.time())))
     phone_number = request.args.get("ApiPhone", "unknown")
-    email_to = request.args.get("ApiEmail", DEFAULT_EMAIL_RECEIVER)
-
+    # נסיון למשוך מייל ברירת מחדל, אבל הלוגיקה האמיתית למטה
+    
     if not file_url:
         logging.error("❌ שגיאת הגדרה: פרמטר 'file_url' חסר.")
         return Response("id_list_message=t-שגיאת הגדרה חמורה במערכת, הקלטה לא התקבלה. אנא פנה למנהל.go_to_folder=/8/6", mimetype="text/plain")
+
+    # ✅ בדיקה אם קיים מייל שמור למשתמש
+    saved_email = get_user_email(phone_number)
+    if saved_email:
+        email_to = saved_email
+        logging.info(f"📧 Found saved email for {phone_number}: {email_to}")
+    else:
+        # אם אין שמור, לוקחים מפרמטר ה-API או ברירת מחדל
+        email_to = request.args.get("ApiEmail", DEFAULT_EMAIL_RECEIVER)
+        logging.info(f"ℹ️ No saved email for {phone_number}, using default/param: {email_to}")
 
     if not email_to:
         logging.warning("⚠️ No email address provided. Aborting email send.")
