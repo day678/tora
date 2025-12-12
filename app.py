@@ -274,51 +274,83 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
             time.sleep(1)
     return "שגיאה בקבלת תשובה מג'מיני."
 
-# --- 🆕 פונקציה משופרת: RAG עם סינון מילים מדויק (Re-ranking) וניקוי ניקוד ---
-def generate_rag_response(user_query: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
+# --- 🆕 פונקציה חדשה: ניתוח אודיו ישיר על ידי ג'מיני (במקום STT) ---
+def analyze_audio_for_rag(audio_path):
     """
-    1. הופך את השאלה למונח גמרא מדויק.
-    2. מחפש ב-Pinecone כמות ענקית (100 תוצאות) כדי לתפוס "פספוסים".
-    3. 🚀 מבצע דירוג מחדש (Re-ranking) אחרי הסרת ניקוד!
-    4. מדפיס ללוג את תוכן המקורות כדי שהמשתמש יראה מה קורה.
+    שולח את האודיו לג'מיני ומבקש:
+    1. תמלול (מה המשתמש אמר).
+    2. מילת חיפוש מדויקת ל-Pinecone (המוח של ג'מיני מחלץ את זה מהאודיו).
+    מחזיר מילון: {'transcript': '...', 'search_term': '...'}
     """
-    if not user_query or not GEMINI_API_KEY:
-        return "שגיאה: חסר טקסט או מפתח API."
-
-    if not PINECONE_AVAILABLE or not PINECONE_API_KEY:
-        logging.warning("⚠️ RAG skipped: Pinecone not configured. Falling back to standard Gemini.")
-        return summarize_with_gemini(user_query, phone_number, instruction_file, remember_history)
+    if not GEMINI_API_KEY:
+        return None
 
     try:
-        # אופטימיזציה לשאילתה
-        search_optimization_prompt = f"""
-        אתה מנוע חיפוש חכם לתלמוד הבבלי.
-        המשתמש שאל: "{user_query}"
+        with open(audio_path, "rb") as f:
+            audio_data = f.read()
+        audio_b64 = base64.b64encode(audio_data).decode("utf-8")
         
-        המשימה: זהה את המושג ההלכתי/תלמודי המרכזי והמר אותו לביטוי חיפוש מדויק בארמית/לשון הקודש.
-        פלט: רק הביטוי עצמו. ללא כוכביות, ללא רשימות.
+        # פרומפט מיוחד שמבקש פלט JSON
+        prompt = """
+        אתה מומחה לתלמוד ולזיהוי דיבור. האזן להקלטה.
+        1. תמלל את שאלת המשתמש במדויק (בעברית).
+        2. זהה את המושג התלמודי המרכזי שצריך לחפש במאגר הש"ס.
+        
+        החזר תשובה בפורמט JSON בלבד, ללא טקסט נוסף:
+        {
+            "transcript": "התמלול המלא של השאלה",
+            "search_term": "הביטוי הארמי/עברי המדויק לחיפוש (ללא מילות קישור, ללא כוכביות)"
+        }
+        
+        דוגמה: המשתמש שואל "מה הגמרא אומרת על הסברה שהמוציא מחברו עליו הראיה?"
+        פלט: {"transcript": "מה הגמרא אומרת על הסברה שהמוציא מחברו עליו הראיה", "search_term": "המוציא מחברו עליו הראיה"}
         """
-        
-        optimized_query = user_query 
-        
-        try:
-             opt_payload = {
-                "contents": [{"parts": [{"text": search_optimization_prompt}]}],
-                "generationConfig": {"temperature": 0.1, "max_output_tokens": 50}
-             }
-             opt_resp = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}", 
-                json=opt_payload, timeout=5
-             )
-             if opt_resp.status_code == 200:
-                 candidate = opt_resp.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
-                 clean_candidate = candidate.replace("*", "").replace("-", "").replace("\n", " ").strip()
-                 if clean_candidate:
-                     optimized_query = clean_candidate
-                 logging.info(f"🔍 Optimized Search Query: '{user_query}' -> '{optimized_query}'")
-        except Exception as opt_e:
-            logging.warning(f"⚠️ Query optimization failed, using original query. Error: {opt_e}")
 
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": "audio/wav", "data": audio_b64}}
+                ]
+            }],
+            "generationConfig": {
+                "temperature": 0.1,
+                "response_mime_type": "application/json" # מבקש JSON מפורש
+            }
+        }
+        
+        API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+        
+        response = requests.post(f"{API_URL}?key={GEMINI_API_KEY}", json=payload, timeout=60)
+        response.raise_for_status()
+        
+        result_json = response.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
+        parsed_data = json.loads(result_json)
+        
+        logging.info(f"🎤 Gemini Audio Analysis: {parsed_data}")
+        return parsed_data
+        
+    except Exception as e:
+        logging.error(f"❌ Error in Gemini Audio Analysis: {e}")
+        return None
+
+# --- פונקציה משופרת: RAG שמקבלת כבר את מילת החיפוש המוכנה ---
+def generate_rag_response(transcript: str, search_term: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
+    """
+    מקבל את התמלול ואת מילת החיפוש (שחולצה כבר מהאודיו).
+    מבצע חיפוש ב-Pinecone, סינון (Re-ranking), ושולח תשובה.
+    """
+    if not transcript or not GEMINI_API_KEY:
+        return "שגיאה: חסר טקסט."
+
+    # שימוש במונח החיפוש שג'מיני הוציא מהאודיו
+    optimized_query = search_term if search_term else transcript
+    logging.info(f"🔍 Using Search Query from Audio: '{optimized_query}'")
+
+    if not PINECONE_AVAILABLE or not PINECONE_API_KEY:
+        return summarize_with_gemini(transcript, phone_number, instruction_file, remember_history)
+
+    try:
         # שלב א: יצירת וקטור
         embedding_result = genai.embed_content(
             model="models/text-embedding-004",
@@ -327,52 +359,36 @@ def generate_rag_response(user_query: str, phone_number: str, instruction_file: 
         )
         query_vector = embedding_result['embedding']
 
-        # שלב ב: חיפוש רחב מאוד (100 תוצאות) - זה הזול ביותר והיעיל ביותר במקרה הזה
+        # שלב ב: חיפוש רחב מאוד (100 תוצאות)
         pc = Pinecone(api_key=PINECONE_API_KEY)
         index = pc.Index(PINECONE_INDEX_NAME)
         
         search_results = index.query(
             vector=query_vector,
-            top_k=100,  # העלינו ל-100 כדי לתפוס את בבא קמא גם אם הוא רחוק
+            top_k=100,
             include_metadata=True
         )
 
         # 🚀 שלב ג: סינון ודירוג מחדש (Re-ranking) עם ניקוי ניקוד
         matches = search_results['matches']
-        
-        # המילים שצריך לחפש (מנקים רווחים כפולים)
         search_terms = optimized_query.split()
         
         for match in matches:
             original_text = match.get('metadata', {}).get('text', '')
-            
-            # --- הדפסת תוכן ללוג (Debug) ---
-            # מדפיסים את 100 התווים הראשונים של כל תוצאה שנבדקת
-            snippet = original_text[:100] if original_text else ""
-            
-            # ניקוי ניקוד מהטקסט כדי לאפשר השוואה
             clean_text = remove_nikud(original_text)
-            
             bonus_score = 0
             
-            # אם הביטוי המלא מופיע בדיוק כמו שהוא (בלי ניקוד) - בונוס ענק
             if optimized_query in clean_text:
-                bonus_score += 3.0 # בונוס מסיבי כדי להקפיץ למעלה
-                logging.info(f"🎯 Exact match (No Nikud) found in {match.get('id', 'unknown')}! Boosting score. Text: {snippet}...")
-            
-            # אחרת, בונוס קטן על כל מילה מהביטוי שמופיעה
+                bonus_score += 3.0
+                logging.info(f"🎯 Exact match found! Boosting score for {match.get('id')}")
             else:
                 matches_count = sum(1 for term in search_terms if term in clean_text)
                 if len(search_terms) > 0:
                     bonus_score += (matches_count / len(search_terms)) * 0.5
             
-            # ציון משוקלל
             match['_adjusted_score'] = (match.get('score', 0) or 0) + bonus_score
 
-        # מיון מחדש לפי הציון המשוקלל
         matches.sort(key=lambda x: x['_adjusted_score'], reverse=True)
-        
-        # לוקחים את 6 התוצאות הטובות ביותר אחרי המיון
         top_matches = matches[:6]
 
         # שלב ד: בניית ההקשר
@@ -381,24 +397,18 @@ def generate_rag_response(user_query: str, phone_number: str, instruction_file: 
             if 'metadata' in match and 'text' in match['metadata']:
                 source_text = match['metadata']['text']
                 source_id = match['id'] if 'id' in match else "מקור"
-                
-                # הדפסה ללוג של התוצאות הסופיות שנבחרו
                 logging.info(f"✅ FINAL CHOICE: {source_id} (Score: {match['_adjusted_score']:.4f})")
-                
                 retrieved_contexts.append(f"--- מקור ({source_id}) ---\n{source_text}")
 
         context_block = "\n\n".join(retrieved_contexts)
-        
-        if not context_block:
-             context_block = "לא נמצאו מקורות ישירים במאגר."
+        if not context_block: context_block = "לא נמצאו מקורות ישירים במאגר."
 
     except Exception as e:
-        logging.error(f"❌ RAG Error (Embedding/Pinecone): {e}")
-        return summarize_with_gemini(user_query, phone_number, instruction_file, remember_history)
+        logging.error(f"❌ RAG Error: {e}")
+        return summarize_with_gemini(transcript, phone_number, instruction_file, remember_history)
 
-    # שלב ה: שליחה לג'מיני
+    # שלב ה: שליחה לג'מיני לתשובה סופית
     instruction_text = load_instructions(instruction_file)
-    
     os.makedirs("/tmp/conversations", exist_ok=True)
     history_path = f"/tmp/conversations/{phone_number}.json"
     history = {"messages": [], "last_updated": time.time()}
@@ -409,8 +419,7 @@ def generate_rag_response(user_query: str, phone_number: str, instruction_file: 
                 history = json.load(f)
             if time.time() - history.get("last_updated", 0) > 1 * 3600:
                 history = {"messages": [], "last_updated": time.time()}
-        except Exception:
-            pass
+        except Exception: pass
 
     history_str = ""
     if history["messages"]:
@@ -419,13 +428,13 @@ def generate_rag_response(user_query: str, phone_number: str, instruction_file: 
     final_prompt = f"""
 {instruction_text}
 
-📚 **מקורות מהגמרא (שעברו סינון קפדני ורלוונטיות):**
+📚 **מקורות מהגמרא (מבוסס על החיפוש: "{optimized_query}"):**
 {context_block}
 
 💬 {history_str}
 
-❓ **שאלת המשתמש:**
-{user_query}
+❓ **שאלת המשתמש (תמלול):**
+{transcript}
 
 🛑 **הנחיה:**
 1. הסבר את הנושא בצורה ברורה.
@@ -452,10 +461,9 @@ def generate_rag_response(user_query: str, phone_number: str, instruction_file: 
             
             if result:
                 if remember_history:
-                    history["messages"].append(f"שאלה: {user_query}")
+                    history["messages"].append(f"שאלה: {transcript}")
                     history["messages"].append(f"תשובה: {result}")
                     history["messages"] = history["messages"][-20:]
-                    history["last_updated"] = time.time()
                     with open(history_path, "w", encoding="utf-8") as f:
                         json.dump(history, f, ensure_ascii=False, indent=2)
                 return result
@@ -641,7 +649,7 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
     except Exception as e: logging.error(e)
     return Response("שגיאה", mimetype="text/plain")
 
-# --- המסלול החדש לתמלול + RAG ---
+# --- המסלול החדש לתמלול + RAG (אודיו -> ג'מיני -> חיפוש) ---
 def process_audio_request_transcript(request, remember_history: bool, instruction_file: str):
     file_url = request.args.get("file_url")
     phone_number = request.args.get("ApiPhone", "unknown")
@@ -652,7 +660,7 @@ def process_audio_request_transcript(request, remember_history: bool, instructio
     if not file_url.startswith("http"):
         file_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={SYSTEM_TOKEN}&path=ivr2:/{file_url}"
     
-    logging.info(f"Processing transcript RAG for {phone_number}")
+    logging.info(f"Processing transcript RAG (Audio Intelligence) for {phone_number}")
     try:
         response = requests.get(file_url)
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_input:
@@ -661,12 +669,20 @@ def process_audio_request_transcript(request, remember_history: bool, instructio
             if is_audio_quiet(temp_input.name):
                 return Response("id_list_message=t-הקובץ שקט מדי&go_to_folder=/8/6", mimetype="text/plain")
             
-            processed = add_silence(temp_input.name)
-            text = recognize_speech(processed)
-            if not text: return Response("id_list_message=t-לא זוהה דיבור&go_to_folder=/8/6", mimetype="text/plain")
+            processed_path = add_silence(temp_input.name).export(tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name, format="wav").name
+            
+            # 🚀 שינוי: שליחת האודיו לג'מיני לקבלת תמלול + מילת חיפוש
+            analysis_result = analyze_audio_for_rag(processed_path)
+            
+            if not analysis_result:
+                os.remove(processed_path)
+                return Response("id_list_message=t-לא הצלחתי להבין את הנאמר&go_to_folder=/8/6", mimetype="text/plain")
 
-            # שימוש בפונקציה החדשה
-            rag_response = generate_rag_response(text, phone_number, instruction_file, remember_history)
+            transcript = analysis_result.get("transcript", "")
+            search_term = analysis_result.get("search_term", "")
+
+            # 🚀 המשך לחיפוש עם המידע שחולץ מהאודיו
+            rag_response = generate_rag_response(transcript, search_term, phone_number, instruction_file, remember_history)
             
             tts_path = synthesize_with_google_tts(rag_response)
             timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -675,8 +691,11 @@ def process_audio_request_transcript(request, remember_history: bool, instructio
             
             if upload_to_yemot(tts_path, full_path):
                 os.remove(tts_path)
+                os.remove(processed_path)
                 update_playfile_ini(phone_number)
                 return Response(f"go_to_folder_and_play=/85/{phone_number},dvartorah_{timestamp}.wav,0.go_to_folder=/8/6", mimetype="text/plain")
+            os.remove(processed_path)
+
     except Exception as e:
         logging.error(f"Error in transcript route: {e}")
         return Response(f"error: {e}", mimetype="text/plain")
