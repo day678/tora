@@ -338,7 +338,7 @@ def generate_rag_response(user_query: str, phone_number: str, instruction_file: 
         
         search_results = index.query(
             vector=query_vector,
-            top_k=5, 
+            top_k=10, 
             include_metadata=True
         )
 
