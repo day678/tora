@@ -362,34 +362,62 @@ def generate_rag_response(user_query: str, phone_number: str, instruction_file: 
         return summarize_with_gemini(user_query, phone_number, instruction_file, remember_history)
 
     try:
-        # שלב א: יצירת וקטור לשאלה (Embedding)
-        # זה השלב שבו המערכת מבינה את המשמעות של השאלה, גם אם התמלול לא 100%
+        # 🚀 שיפור קריטי: המרת שאלת משתמש למונחי חיפוש תלמודיים
+        # זה פותר את הבעיה שהשאלה היא "מה ההסבר" והמסד מכיל "אמר רב הונא..."
+        search_optimization_prompt = f"""
+        הנך מומחה לתלמוד. המשתמש שאל שאלה בעברית מודרנית.
+        אנא נסח את השאלה מחדש כרצף של מילות חיפוש ומילות מפתח בארמית/לשון הקודש כדי למצוא את המקור המדויק בגמרא (בבלי).
+        אל תענה על השאלה, רק פלוט את מילות החיפוש.
+        
+        שאלה מקורית: "{user_query}"
+        מילות חיפוש (ארמית/לשון הקודש):
+        """
+        
+        optimized_query = user_query # ברירת מחדל
+        
+        # קריאה מהירה לג'מיני לשיפור השאילתה
+        try:
+             opt_payload = {
+                "contents": [{"parts": [{"text": search_optimization_prompt}]}],
+                "generationConfig": {"temperature": 0.3, "max_output_tokens": 50}
+             }
+             opt_resp = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}", 
+                json=opt_payload, timeout=5
+             )
+             if opt_resp.status_code == 200:
+                 optimized_query = opt_resp.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+                 logging.info(f"🔍 Optimized Search Query: '{user_query}' -> '{optimized_query}'")
+        except Exception as opt_e:
+            logging.warning(f"⚠️ Query optimization failed, using original query. Error: {opt_e}")
+
+        # שלב א: יצירת וקטור לשאילתה המשופרת (Embedding)
         embedding_result = genai.embed_content(
             model="models/text-embedding-004",
-            content=user_query,
+            content=optimized_query,
             task_type="retrieval_query"
         )
         query_vector = embedding_result['embedding']
 
         # שלב ב: חיפוש במסד הנתונים (Retrieval)
-        # כאן מתבצעת ההחלטה איזה מידע לשלוף על סמך קרבה מתמטית
         pc = Pinecone(api_key=PINECONE_API_KEY)
         index = pc.Index(PINECONE_INDEX_NAME)
         
         search_results = index.query(
             vector=query_vector,
-            top_k=4,  # מספר הקטעים לשליפה (אפשר לשנות ל-3 או 5)
+            top_k=5,  # הגדלנו ל-5 תוצאות
             include_metadata=True
         )
 
         # שלב ג: בניית ההקשר (Context) מתוך התוצאות
         retrieved_contexts = []
         for match in search_results['matches']:
-            # הנחה: הטקסט המקורי שמור בתוך metadata תחת שדה 'text'
             if 'metadata' in match and 'text' in match['metadata']:
                 source_text = match['metadata']['text']
-                # אם יש מזהה מקור (כמו שם מסכת ודף), נוסיף אותו
                 source_id = match['id'] if 'id' in match else "מקור"
+                # הוספת ציון הרלוונטיות ללוג כדי להבין אם החיפוש הצליח
+                score = match['score'] if 'score' in match else 0
+                logging.info(f"📄 Retrieved: {source_id} (Score: {score:.4f})")
                 retrieved_contexts.append(f"--- מקור ({source_id}) ---\n{source_text}")
 
         context_block = "\n\n".join(retrieved_contexts)
@@ -400,7 +428,6 @@ def generate_rag_response(user_query: str, phone_number: str, instruction_file: 
 
     except Exception as e:
         logging.error(f"❌ RAG Error (Embedding/Pinecone): {e}")
-        # במקרה של תקלה בחיפוש, עדיין ננסה לענות רגיל
         return summarize_with_gemini(user_query, phone_number, instruction_file, remember_history)
 
     # שלב ד: הכנת הפרומפט המלא לג'מיני (עם המקורות)
@@ -423,13 +450,13 @@ def generate_rag_response(user_query: str, phone_number: str, instruction_file: 
     # בניית ההודעה לג'מיני
     history_str = ""
     if history["messages"]:
-        history_str = "היסטוריית שיחה קודמת:\n" + "\n".join(history["messages"][-6:]) # לוקחים רק את האחרונות כדי לחסוך מקום
+        history_str = "היסטוריית שיחה קודמת:\n" + "\n".join(history["messages"][-6:])
 
-    # הפרומפט החדש: הנחיות + מקורות מהמאגר + היסטוריה + השאלה החדשה
+    # הפרומפט החדש
     final_prompt = f"""
 {instruction_text}
 
-📚 **מקורות מידע (מהתלמוד/מאגר המידע) שיש להתבסס עליהם בתשובה:**
+📚 **מקורות מידע (מהתלמוד/מאגר המידע) שנמצאו בחיפוש:**
 {context_block}
 
 💬 {history_str}
@@ -437,13 +464,13 @@ def generate_rag_response(user_query: str, phone_number: str, instruction_file: 
 ❓ **שאלה חדשה:**
 {user_query}
 
-אנא ענה על השאלה בהתבסס על המקורות המצורפים לעיל. אם התמלול נראה שגוי, נסה להבין את הכוונה לפי המקורות.
+הנחיה חשובה: השתמש במקורות המצורפים כדי לענות על השאלה. אם המקורות נראים לא קשורים (למשל, עוסקים בקורבנות והשאלה היא ממונית), ציין זאת וענה לפי הידע הכללי שלך, אך נסה קודם למצוא את הקשר במקורות.
 """
 
     # שלב ה: שליחה לג'מיני
     payload = {
         "contents": [{"parts": [{"text": final_prompt}]}],
-        "generationConfig": {"temperature": 0.5, "max_output_tokens": 2000} # טמפרטורה נמוכה יותר לדיוק
+        "generationConfig": {"temperature": 0.4, "max_output_tokens": 2000} 
     }
 
     API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent"
