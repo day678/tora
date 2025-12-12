@@ -6,7 +6,6 @@ import logging
 import time
 import requests
 import threading
-import time
 import re
 import subprocess 
 import google.generativeai as genai 
@@ -65,7 +64,7 @@ logging.basicConfig(
 
 app = Flask(__name__)
 
-# --- ✅ יצירה אוטומטית של קבצי הוראות חסרים (כדי למנוע את השגיאה בלוג) ---
+# --- ✅ יצירה אוטומטית של קבצי הוראות חסרים ---
 def ensure_instruction_files_exist():
     defaults = {
         INSTRUCTIONS_TRANSCRIPT_NEW_FILE: """הנך חברותא וירטואלי לתלמוד בבלי.
@@ -182,6 +181,13 @@ def apply_vowelized_lexicon(text: str) -> str:
         processed_text = re.sub(pattern, vowelized, processed_text)
     return f'<speak lang="he-IL">{processed_text}</speak>'
 
+# --- פונקציית עזר לניקוי ניקוד (קריטי לחיפוש המדויק) ---
+def remove_nikud(text):
+    """מסירה ניקוד עברי מטקסט כדי לאפשר השוואה חלקה."""
+    # טווח היוניקוד של ניקוד עברי הוא 0591 עד 05C7
+    normalized = re.sub(r'[\u0591-\u05C7]', '', text)
+    return normalized
+
 # --- ניהול משתמשים ומיילים ---
 def save_user_email(phone, email):
     data = {}
@@ -268,12 +274,13 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
             time.sleep(1)
     return "שגיאה בקבלת תשובה מג'מיני."
 
-# --- 🆕 פונקציה משופרת: RAG עם אופטימיזציה למונחי גמרא ---
+# --- 🆕 פונקציה משופרת: RAG עם סינון מילים מדויק (Re-ranking) וניקוי ניקוד ---
 def generate_rag_response(user_query: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
     """
-    1. הופך את השאלה למונח גמרא מדויק (בלי מילים מיותרות).
-    2. מחפש את הקטעים הכי רלוונטיים ב-Pinecone.
-    3. שולח לג'מיני את השאלה המקורית + המקורות שנמצאו.
+    1. הופך את השאלה למונח גמרא מדויק.
+    2. מחפש ב-Pinecone כמות ענקית (100 תוצאות) כדי לתפוס "פספוסים".
+    3. 🚀 מבצע דירוג מחדש (Re-ranking) אחרי הסרת ניקוד!
+    4. מדפיס ללוג את תוכן המקורות כדי שהמשתמש יראה מה קורה.
     """
     if not user_query or not GEMINI_API_KEY:
         return "שגיאה: חסר טקסט או מפתח API."
@@ -283,32 +290,21 @@ def generate_rag_response(user_query: str, phone_number: str, instruction_file: 
         return summarize_with_gemini(user_query, phone_number, instruction_file, remember_history)
 
     try:
-        # 🚀 שיפור קריטי: בקשה לביטוי הארמי המדויק בלבד
+        # אופטימיזציה לשאילתה
         search_optimization_prompt = f"""
         אתה מנוע חיפוש חכם לתלמוד הבבלי.
         המשתמש שאל: "{user_query}"
         
-        המשימה שלך:
-        זהה את המושג המרכזי בשאלה והמר אותו למשפט חיפוש המורכב **אך ורק** מהמילים המדויקות כפי שהן מופיעות בגמרא (ארמית/לשון הקודש).
-        
-        כללים מחמירים:
-        1. אל תכתוב רשימת מכולת (בלי כוכביות, בלי בולטים).
-        2. אל תכתוב מילים כלליות כמו "גמרא", "דין", "ביאור", "פירוש", "סוגיה". מילים אלו הורסות את החיפוש.
-        3. פלוט רק את הביטוי עצמו.
-        
-        דוגמה:
-        אם השאלה היא "מה הגמרא אומרת על הסברה שהמוציא מחברו עליו הראיה?"
-        הפלט שלך צריך להיות: "המוציא מחברו עליו הראיה"
-        
-        ביטוי לחיפוש:
+        המשימה: זהה את המושג ההלכתי/תלמודי המרכזי והמר אותו לביטוי חיפוש מדויק בארמית/לשון הקודש.
+        פלט: רק הביטוי עצמו. ללא כוכביות, ללא רשימות.
         """
         
-        optimized_query = user_query # ברירת מחדל
+        optimized_query = user_query 
         
         try:
              opt_payload = {
                 "contents": [{"parts": [{"text": search_optimization_prompt}]}],
-                "generationConfig": {"temperature": 0.1, "max_output_tokens": 50} # טמפרטורה נמוכה מאוד לדיוק
+                "generationConfig": {"temperature": 0.1, "max_output_tokens": 50}
              }
              opt_resp = requests.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}", 
@@ -316,7 +312,6 @@ def generate_rag_response(user_query: str, phone_number: str, instruction_file: 
              )
              if opt_resp.status_code == 200:
                  candidate = opt_resp.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
-                 # ניקוי נוסף של הפלט למקרה שג'מיני הוסיף שטויות
                  clean_candidate = candidate.replace("*", "").replace("-", "").replace("\n", " ").strip()
                  if clean_candidate:
                      optimized_query = clean_candidate
@@ -324,7 +319,7 @@ def generate_rag_response(user_query: str, phone_number: str, instruction_file: 
         except Exception as opt_e:
             logging.warning(f"⚠️ Query optimization failed, using original query. Error: {opt_e}")
 
-        # שלב א: יצירת וקטור לשאילתה המשופרת
+        # שלב א: יצירת וקטור
         embedding_result = genai.embed_content(
             model="models/text-embedding-004",
             content=optimized_query,
@@ -332,37 +327,76 @@ def generate_rag_response(user_query: str, phone_number: str, instruction_file: 
         )
         query_vector = embedding_result['embedding']
 
-        # שלב ב: חיפוש במסד הנתונים
+        # שלב ב: חיפוש רחב מאוד (100 תוצאות) - זה הזול ביותר והיעיל ביותר במקרה הזה
         pc = Pinecone(api_key=PINECONE_API_KEY)
         index = pc.Index(PINECONE_INDEX_NAME)
         
         search_results = index.query(
             vector=query_vector,
-            top_k=30, 
+            top_k=100,  # העלינו ל-100 כדי לתפוס את בבא קמא גם אם הוא רחוק
             include_metadata=True
         )
 
-        # שלב ג: בניית ההקשר
+        # 🚀 שלב ג: סינון ודירוג מחדש (Re-ranking) עם ניקוי ניקוד
+        matches = search_results['matches']
+        
+        # המילים שצריך לחפש (מנקים רווחים כפולים)
+        search_terms = optimized_query.split()
+        
+        for match in matches:
+            original_text = match.get('metadata', {}).get('text', '')
+            
+            # --- הדפסת תוכן ללוג (Debug) ---
+            # מדפיסים את 100 התווים הראשונים של כל תוצאה שנבדקת
+            snippet = original_text[:100] if original_text else ""
+            
+            # ניקוי ניקוד מהטקסט כדי לאפשר השוואה
+            clean_text = remove_nikud(original_text)
+            
+            bonus_score = 0
+            
+            # אם הביטוי המלא מופיע בדיוק כמו שהוא (בלי ניקוד) - בונוס ענק
+            if optimized_query in clean_text:
+                bonus_score += 3.0 # בונוס מסיבי כדי להקפיץ למעלה
+                logging.info(f"🎯 Exact match (No Nikud) found in {match.get('id', 'unknown')}! Boosting score. Text: {snippet}...")
+            
+            # אחרת, בונוס קטן על כל מילה מהביטוי שמופיעה
+            else:
+                matches_count = sum(1 for term in search_terms if term in clean_text)
+                if len(search_terms) > 0:
+                    bonus_score += (matches_count / len(search_terms)) * 0.5
+            
+            # ציון משוקלל
+            match['_adjusted_score'] = (match.get('score', 0) or 0) + bonus_score
+
+        # מיון מחדש לפי הציון המשוקלל
+        matches.sort(key=lambda x: x['_adjusted_score'], reverse=True)
+        
+        # לוקחים את 6 התוצאות הטובות ביותר אחרי המיון
+        top_matches = matches[:6]
+
+        # שלב ד: בניית ההקשר
         retrieved_contexts = []
-        for match in search_results['matches']:
+        for match in top_matches:
             if 'metadata' in match and 'text' in match['metadata']:
                 source_text = match['metadata']['text']
                 source_id = match['id'] if 'id' in match else "מקור"
-                score = match['score'] if 'score' in match else 0
-                logging.info(f"📄 Retrieved: {source_id} (Score: {score:.4f})")
+                
+                # הדפסה ללוג של התוצאות הסופיות שנבחרו
+                logging.info(f"✅ FINAL CHOICE: {source_id} (Score: {match['_adjusted_score']:.4f})")
+                
                 retrieved_contexts.append(f"--- מקור ({source_id}) ---\n{source_text}")
 
         context_block = "\n\n".join(retrieved_contexts)
         
         if not context_block:
-             logging.info("ℹ️ No relevant context found in DB for this query.")
              context_block = "לא נמצאו מקורות ישירים במאגר."
 
     except Exception as e:
         logging.error(f"❌ RAG Error (Embedding/Pinecone): {e}")
         return summarize_with_gemini(user_query, phone_number, instruction_file, remember_history)
 
-    # שלב ד: הכנת הפרומפט המלא לתשובה
+    # שלב ה: שליחה לג'מיני
     instruction_text = load_instructions(instruction_file)
     
     os.makedirs("/tmp/conversations", exist_ok=True)
@@ -385,18 +419,20 @@ def generate_rag_response(user_query: str, phone_number: str, instruction_file: 
     final_prompt = f"""
 {instruction_text}
 
-📚 **מקורות מהגמרא (שנמצאו לפי החיפוש: "{optimized_query}"):**
+📚 **מקורות מהגמרא (שעברו סינון קפדני ורלוונטיות):**
 {context_block}
 
 💬 {history_str}
 
-❓ **שאלת המשתמש המקורית:**
+❓ **שאלת המשתמש:**
 {user_query}
 
-הנחיה: ענה על שאלת המשתמש. השתמש במקורות כדי להסביר את המושג או הסוגיה שעליה נשאלת. אם המקורות מתאימים (למשל מצאת את הסוגיה הנכונה), בסס את תשובתך עליהם.
+🛑 **הנחיה:**
+1. הסבר את הנושא בצורה ברורה.
+2. המקורות המצורפים הם הטובים ביותר שמצאנו. אם הם מכילים את הדין המפורש - צטט והסבר.
+3. אם המקורות הם רק דוגמאות (למשל מיישמים את הכלל במקרה ספציפי), הסבר את הכלל הראשי מידיעתך, והשתמש במקורות כדוגמה.
 """
 
-    # שלב ה: שליחה לג'מיני (המוח העונה)
     payload = {
         "contents": [{"parts": [{"text": final_prompt}]}],
         "generationConfig": {"temperature": 0.4, "max_output_tokens": 2000} 
