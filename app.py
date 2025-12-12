@@ -183,10 +183,13 @@ def apply_vowelized_lexicon(text: str) -> str:
 # --- פונקציית עזר לניקוי ניקוד וסימני פיסוק ---
 def normalize_text_for_search(text):
     """מסירה ניקוד עברי וסימני פיסוק כדי לאפשר השוואה חלקה."""
+    if not text: return ""
     # הסרת ניקוד (0591-05C7)
     no_nikud = re.sub(r'[\u0591-\u05C7]', '', text)
     # הסרת פיסוק (משאירים רק אותיות ומספרים ורווחים)
     clean = re.sub(r'[^\w\s]', '', no_nikud)
+    # צמצום רווחים כפולים
+    clean = re.sub(r'\s+', ' ', clean).strip()
     return clean
 
 # --- ניהול משתמשים ומיילים ---
@@ -331,11 +334,11 @@ def analyze_audio_for_rag(audio_path):
         logging.error(f"❌ Error in Gemini Audio Analysis: {e}")
         return None
 
-# --- פונקציה משופרת: RAG עם דירוג חכם (Smart Re-ranking) ---
+# --- פונקציה משופרת: RAG עם דירוג חכם וגמיש (Smart Fuzzy Re-ranking) ---
 def generate_rag_response(transcript: str, search_term: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
     """
     מקבל את התמלול ומילת החיפוש.
-    מבצע חיפוש רחב ב-Pinecone ואז מפעיל אלגוריתם דירוג מחדש כדי למצוא את המקור המדויק.
+    מבצע חיפוש רחב ב-Pinecone (400 תוצאות) ואז מפעיל אלגוריתם דירוג גמיש.
     """
     if not transcript or not GEMINI_API_KEY:
         return "שגיאה: חסר טקסט."
@@ -356,51 +359,64 @@ def generate_rag_response(transcript: str, search_term: str, phone_number: str, 
         )
         query_vector = embedding_result['embedding']
 
-        # שלב ב: חיפוש רחב מאוד (100 תוצאות)
+        # שלב ב: חיפוש רחב מאוד - הוגדל ל-300 כדי לתפוס גם את מסכת סוכה
         pc = Pinecone(api_key=PINECONE_API_KEY)
         index = pc.Index(PINECONE_INDEX_NAME)
         
         search_results = index.query(
             vector=query_vector,
-            top_k=100, 
+            top_k=300, 
             include_metadata=True
         )
 
-        # 🚀 שלב ג: סינון ודירוג מחדש (Re-ranking) משופר
+        # 🚀 שלב ג: סינון ודירוג מחדש (Re-ranking) גמיש (Proximity Search)
         matches = search_results['matches']
         search_words = optimized_query.split()
         
         for match in matches:
             original_text = match.get('metadata', {}).get('text', '')
             clean_text = normalize_text_for_search(original_text) # ניקוי ניקוד ופיסוק
+            text_words = clean_text.split()
             
             bonus_score = 0
             
-            # 1. בונוס על התאמה מלאה (ביטוי מדויק)
-            if optimized_query in clean_text:
-                bonus_score += 5.0 # בונוס מטורף
-                logging.info(f"🎯 Exact Phrase Found in {match.get('id')}! (+5.0)")
+            # 1. חיפוש גמיש: מילים המופיעות בקרבה (Proximity)
+            # בודקים אם מילה מהשאילתה מופיעה בטקסט, ואם המילה הבאה בשאילתה מופיעה בטווח של 3 מילים אחריה
+            proximity_matches = 0
+            if len(search_words) > 1:
+                # מיפוי מיקומים של כל מילה בטקסט המנוקה
+                word_positions = {}
+                for idx, word in enumerate(text_words):
+                    if word not in word_positions:
+                        word_positions[word] = []
+                    word_positions[word].append(idx)
+                
+                # בדיקת רצף עם דילוגים
+                for i in range(len(search_words) - 1):
+                    word1 = search_words[i]
+                    word2 = search_words[i+1]
+                    
+                    if word1 in word_positions and word2 in word_positions:
+                        # בודקים אם יש מופע של word2 אחרי word1 במרחק סביר (עד 3 מילים)
+                        for pos1 in word_positions[word1]:
+                            for pos2 in word_positions[word2]:
+                                dist = pos2 - pos1
+                                if 0 < dist <= 4: # מרחק של 1-4 מילים (מאפשר "סוכה שהיא גבוהה")
+                                    proximity_matches += 1
+                                    break # מצאנו זוג כזה, עוברים לזוג הבא
             
-            # 2. בונוס על רצף (Sequence) - זוגות של מילים
-            # זה מונע מצב שבו "סוכה" ו"גבוהה" מופיעות בנפרד (כמו בזבחים) ועדיין מקבלות ניקוד
-            sequence_matches = 0
-            for i in range(len(search_words) - 1):
-                bigram = f"{search_words[i]} {search_words[i+1]}"
-                if bigram in clean_text:
-                    sequence_matches += 1
-            
-            if sequence_matches > 0:
-                bonus_score += sequence_matches * 1.0 # כל זוג נכון נותן נקודה
-                logging.info(f"🔗 Sequence Found in {match.get('id')}: {sequence_matches} pairs")
+            if proximity_matches > 0:
+                bonus_score += proximity_matches * 1.5 # בונוס משמעותי על קרבה
+                logging.info(f"🔗 Proximity Match in {match.get('id')}: {proximity_matches} pairs")
 
-            # 3. בונוס על אחוז מילים (Keyword Coverage)
-            found_words = sum(1 for word in search_words if word in clean_text)
-            coverage = found_words / len(search_words) if search_words else 0
+            # 2. בונוס על אחוז מילים (Coverage)
+            found_words_count = sum(1 for word in search_words if word in text_words)
+            coverage = found_words_count / len(search_words) if search_words else 0
             
-            if coverage > 0.8: # אם יותר מ-80% מהמילים נמצאות
-                bonus_score += 2.0
+            if coverage >= 0.8: 
+                bonus_score += 3.0 # בונוס ענק אם כמעט כל המילים נמצאות
             elif coverage > 0.5:
-                bonus_score += 0.5
+                bonus_score += 1.0
             
             match['_adjusted_score'] = (match.get('score', 0) or 0) + bonus_score
 
