@@ -8,16 +8,26 @@ import requests
 import threading
 import time
 import re
-import subprocess  # 🆕 נדרש להמרת האודיו מ-Gemini
-import google.generativeai as genai  # 🆕 נדרש למודל החדש
+import subprocess 
+import google.generativeai as genai 
 from flask import Flask, request, Response
 from pydub import AudioSegment
 import speech_recognition as sr
-from google.cloud import texttospeech  # נשאר עבור הפונקציות המקוריות
+from google.cloud import texttospeech 
+
+# ניסיון לייבא את ספריית Pinecone לחיבור למסד הנתונים הווקטורי
+try:
+    from pinecone import Pinecone
+    PINECONE_AVAILABLE = True
+except ImportError:
+    PINECONE_AVAILABLE = False
+    logging.warning("⚠️ Pinecone library not found. RAG features will be disabled.")
 
 # ------------------ Configuration ------------------
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_CREDENTIALS_B64 = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_B64")
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY") # 🆕 מפתח ל-Pinecone
+PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "shas-bavli-v2") # 🆕 שם האינדקס שלך
 
 # סף רעש מינימלי (בדציבלים). אם הקובץ שקט מזה, הוא ייחשב כשקט מדי.
 MIN_AUDIO_DBFS = -45.0 
@@ -36,17 +46,20 @@ BASE_YEMOT_FOLDER = "ivr2:/85"  # שלוחה ראשית לכל הקבצים
 
 INSTRUCTIONS_CONTINUE_FILE = "instructions_continue.txt"
 INSTRUCTIONS_NEW_FILE = "instructions_new.txt"
-# --- הוספת קובץ הנחיות חדש עבור המייל ---
+# --- קובץ הנחיות למייל ---
 INSTRUCTIONS_EMAIL_FILE = "instructions_email.txt"
+# --- קבצי הנחיות חדשים לתמלול ---
+INSTRUCTIONS_TRANSCRIPT_NEW_FILE = "instructions_transcript_new.txt"
+INSTRUCTIONS_TRANSCRIPT_CONTINUE_FILE = "instructions_transcript_continue.txt"
 
 VOWELIZED_LEXICON_FILE = "vowelized_lexicon.txt"
 VOWELIZED_LEXICON = {}
 
 # --- הגדרות חדשות לשליחת מייל (Brevo) ---
-BREVO_API_KEY = os.getenv("BREVO_API_KEY") # מפתח API חדש
-EMAIL_USER = os.getenv("EMAIL_USER") # כתובת המייל המאומתת (השולח)
-DEFAULT_EMAIL_RECEIVER = os.getenv("DEFAULT_EMAIL_RECEIVER") # כתובת גיבוי אם לא סופק ApiEmail
-EMAIL_SENDER_NAME = "מערכת סיכום שיחות" # השם שיופיע כשולח
+BREVO_API_KEY = os.getenv("BREVO_API_KEY") 
+EMAIL_USER = os.getenv("EMAIL_USER") 
+DEFAULT_EMAIL_RECEIVER = os.getenv("DEFAULT_EMAIL_RECEIVER") 
+EMAIL_SENDER_NAME = "מערכת סיכום שיחות" 
 
 # ------------------ Logging ------------------
 logging.basicConfig(
@@ -98,13 +111,11 @@ def is_audio_quiet(file_path: str) -> bool:
     try:
         audio = AudioSegment.from_file(file_path)
         logging.info(f"🎤 Audio max dBFS: {audio.max_dBFS}")
-        # בדיקה אם העוצמה המקסימלית נמוכה מהסף (למשל -45)
         if audio.max_dBFS < MIN_AUDIO_DBFS:
             return True
         return False
     except Exception as e:
         logging.error(f"⚠️ Error checking audio volume: {e}")
-        # במקרה של שגיאה בבדיקה, נעדיף לא לחסום סתם, נחזיר שהקובץ תקין
         return False
 
 
@@ -131,7 +142,6 @@ def load_instructions(file_path: str) -> str:
             return f.read().strip()
     except Exception:
         logging.warning(f"⚠️ Instruction file {file_path} not found or unreadable.")
-        # הנחיית ברירת מחדל אם הקובץ לא נמצא
         return "סכם את ההודעה הבאה בצורה ברורה ותמציתית."
 
 
@@ -144,23 +154,12 @@ def clean_text_for_tts(text: str) -> str:
 
 def apply_vowelized_lexicon(text: str) -> str:
     if not VOWELIZED_LEXICON:
-        # אם אין לקסיקון, רק מחזירים את הטקסט (ב-Gemini אין תגיות speak, בגוגל יש)
         return f'<speak lang="he-IL">{text}</speak>'
     processed_text = text
     for unvowelized, vowelized in VOWELIZED_LEXICON.items():
         pattern = r'\b' + re.escape(unvowelized) + r'\b'
         processed_text = re.sub(pattern, vowelized, processed_text)
     return f'<speak lang="he-IL">{processed_text}</speak>'
-
-def apply_vowelized_lexicon_clean(text: str) -> str:
-    """גרסה נקייה עבור ג'מיני שלא צריכה תגיות XML"""
-    if not VOWELIZED_LEXICON:
-        return text
-    processed_text = text
-    for unvowelized, vowelized in VOWELIZED_LEXICON.items():
-        pattern = r'\b' + re.escape(unvowelized) + r'\b'
-        processed_text = re.sub(pattern, vowelized, processed_text)
-    return processed_text
 
 
 # --- 🆕 ניהול משתמשים ומיילים ---
@@ -195,7 +194,7 @@ def get_user_email(phone):
     return None
 
 
-# --- פונקציה לעיבוד ישיר של אודיו מול ג'מיני (Direct Audio) ---
+# --- פונקציה לעיבוד ישיר של אודיו מול ג'מיני (Direct Audio) - עבור ה-Route הרגיל ---
 def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
     if not GEMINI_API_KEY:
         logging.error("Missing GEMINI_API_KEY")
@@ -218,16 +217,14 @@ def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file
 
     context_parts = []
     
-    # אם יש היסטוריה, נוסיף אותה כטקסט לפני האודיו הנוכחי
+    # אם יש היסטוריה
     if remember_history and os.path.exists(history_path):
         try:
             with open(history_path, "r", encoding="utf-8") as f:
                 history = json.load(f)
-            # סינון הודעות ישנות (מעל שעה)
             if time.time() - history.get("last_updated", 0) > 1 * 3600:
                 history = {"messages": [], "last_updated": time.time()}
             
-            # הוספת ההיסטוריה כקונטקסט (רק תשובות המערכת הקודמות כי אין לנו את הטקסט של המשתמש כרגע)
             if history["messages"]:
                 history_context = "היסטוריית השיחה עד כה (תשובות קודמות):\n" + "\n---\n".join(history["messages"])
                 context_parts.append({"text": history_context})
@@ -237,7 +234,7 @@ def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file
     # הוספת ההנחיה הראשית
     context_parts.append({"text": f"{instruction_text}\n\nהנה ההודעה הקולית החדשה של המשתמש, ענה עליה בקצרה:"})
     
-    # הוספת קובץ האודיו עצמו (Inline Data)
+    # הוספת קובץ האודיו עצמו
     context_parts.append({
         "inline_data": {
             "mime_type": "audio/wav", 
@@ -248,22 +245,17 @@ def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file
     # 3. הכנת הבקשה ל-Gemini
     payload = {
         "contents": [{"parts": context_parts}],
-        # מודל מהיר וזול לאודיו
         "generationConfig": {"temperature": 0.6, "max_output_tokens": 800}
     }
 
-    # שימוש במודל gemini-2.5-flash-lite כפי שביקשת
     API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
     
-    # מנגנון Retry חכם לשגיאות 429
     for attempt in range(3):
         try:
             response = requests.post(f"{API_URL}?key={GEMINI_API_KEY}", json=payload, timeout=60)
             
-            # טיפול ספציפי בעומס (429)
             if response.status_code == 429:
                 wait_time = 5 * (attempt + 1)
-                logging.warning(f"⚠️ Got 429 Too Many Requests. Sleeping for {wait_time} seconds before retry {attempt + 1}...")
                 time.sleep(wait_time)
                 continue
                 
@@ -272,9 +264,8 @@ def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file
             result_text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
             
             if result_text:
-                # שמירה בהיסטוריה (שומרים את התשובה שלנו)
                 if remember_history:
-                    history["messages"].append(f"תשובה: {result_text}") # שומרים רק את התשובה
+                    history["messages"].append(f"תשובה: {result_text}")
                     history["messages"] = history["messages"][-20:]
                     history["last_updated"] = time.time()
                     with open(history_path, "w", encoding="utf-8") as f:
@@ -289,17 +280,17 @@ def run_gemini_audio_direct(audio_path: str, phone_number: str, instruction_file
     return "שגיאה: עומס חריג בשרתי הבינה המלאכותית."
 
 
+# --- פונקציה לעיבוד טקסט (משמשת למייל) ---
 def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
-    # פונקציה זו נשארת עבור תהליך המייל שעדיין עובד עם טקסט (STT)
     if not text_to_summarize or not GEMINI_API_KEY:
-        logging.warning("Skipping Gemini summarization: Missing text or API key.")
-        return "שגיאה: לא ניתן לנסח דבר תורה."
+        return "שגיאה: לא ניתן לנסח תשובה."
 
     instruction_text = load_instructions(instruction_file)
     os.makedirs("/tmp/conversations", exist_ok=True)
     history_path = f"/tmp/conversations/{phone_number}.json"
     history = {"messages": [], "last_updated": time.time()}
 
+    # טעינת היסטוריה
     if remember_history and os.path.exists(history_path):
         try:
             with open(history_path, "r", encoding="utf-8") as f:
@@ -308,22 +299,24 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
             pass
         if time.time() - history.get("last_updated", 0) > 1 * 3600:
             history = {"messages": [], "last_updated": time.time()}
-        history["messages"].append(text_to_summarize)
+        
+        # מוסיפים את הטקסט הנוכחי להיסטוריה
+        history["messages"].append(f"שאלה: {text_to_summarize}")
         history["messages"] = history["messages"][-20:]
         history["last_updated"] = time.time()
         context_text = "\n---\n".join(history["messages"])
     else:
-        history = {"messages": [text_to_summarize], "last_updated": time.time()}
-        context_text = text_to_summarize
+        # אם אין היסטוריה או שזו שיחה חדשה
+        history = {"messages": [f"שאלה: {text_to_summarize}"], "last_updated": time.time()}
+        context_text = f"שאלה: {text_to_summarize}"
 
-    prompt = f"{instruction_text}\n\nדברי התורה שנאמרו:\n{context_text}"
+    prompt = f"{instruction_text}\n\nהנה הטקסט שהתקבל:\n{context_text}"
 
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.6, "max_output_tokens": 2900}
     }
 
-    # שימוש בגרסה המעודכנת גם לטקסט
     API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent"
     
     for attempt in range(3):
@@ -332,23 +325,156 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
             
             if response.status_code == 429:
                 wait_time = 5 * (attempt + 1)
-                logging.warning(f"⚠️ Got 429 in Text Summary. Sleeping for {wait_time}s...")
                 time.sleep(wait_time)
                 continue
 
             response.raise_for_status()
             data = response.json()
             result = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
-            if remember_history:
-                with open(history_path, "w", encoding="utf-8") as f:
-                    json.dump(history, f, ensure_ascii=False, indent=2)
+            
             if result:
+                # עדכון ההיסטוריה עם התשובה
+                if remember_history:
+                    history["messages"].append(f"תשובה: {result}")
+                    history["messages"] = history["messages"][-20:] # שומר על גודל סביר
+                    with open(history_path, "w", encoding="utf-8") as f:
+                        json.dump(history, f, ensure_ascii=False, indent=2)
                 return result
         except Exception as e:
             logging.error(f"Gemini API error (attempt {attempt+1}): {e}")
             time.sleep(1)
             
-    return text_to_summarize # במקרה כשל, מחזיר את הטקסט המקורי
+    return "שגיאה בקבלת תשובה מג'מיני."
+
+# --- 🆕 פונקציה חדשה: RAG (חיפוש וקטורי + תשובה) עבור המסלול החדש ---
+def generate_rag_response(user_query: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
+    """
+    1. הופך את השאלה לווקטור (Embedding).
+    2. מחפש את הקטעים הכי רלוונטיים ב-Pinecone (ההחלטה איזה וקטורים יישלחו נעשית כאן).
+    3. שולח לג'מיני את השאלה + המקורות שנמצאו.
+    """
+    if not user_query or not GEMINI_API_KEY:
+        return "שגיאה: חסר טקסט או מפתח API."
+
+    # אם אין Pinecone מוגדר, חוזרים לשיטה הישנה (גיבוי)
+    if not PINECONE_AVAILABLE or not PINECONE_API_KEY:
+        logging.warning("⚠️ RAG skipped: Pinecone not configured. Falling back to standard Gemini.")
+        return summarize_with_gemini(user_query, phone_number, instruction_file, remember_history)
+
+    try:
+        # שלב א: יצירת וקטור לשאלה (Embedding)
+        # זה השלב שבו המערכת מבינה את המשמעות של השאלה, גם אם התמלול לא 100%
+        embedding_result = genai.embed_content(
+            model="models/text-embedding-004",
+            content=user_query,
+            task_type="retrieval_query"
+        )
+        query_vector = embedding_result['embedding']
+
+        # שלב ב: חיפוש במסד הנתונים (Retrieval)
+        # כאן מתבצעת ההחלטה איזה מידע לשלוף על סמך קרבה מתמטית
+        pc = Pinecone(api_key=PINECONE_API_KEY)
+        index = pc.Index(PINECONE_INDEX_NAME)
+        
+        search_results = index.query(
+            vector=query_vector,
+            top_k=4,  # מספר הקטעים לשליפה (אפשר לשנות ל-3 או 5)
+            include_metadata=True
+        )
+
+        # שלב ג: בניית ההקשר (Context) מתוך התוצאות
+        retrieved_contexts = []
+        for match in search_results['matches']:
+            # הנחה: הטקסט המקורי שמור בתוך metadata תחת שדה 'text'
+            if 'metadata' in match and 'text' in match['metadata']:
+                source_text = match['metadata']['text']
+                # אם יש מזהה מקור (כמו שם מסכת ודף), נוסיף אותו
+                source_id = match['id'] if 'id' in match else "מקור"
+                retrieved_contexts.append(f"--- מקור ({source_id}) ---\n{source_text}")
+
+        context_block = "\n\n".join(retrieved_contexts)
+        
+        if not context_block:
+             logging.info("ℹ️ No relevant context found in DB for this query.")
+             context_block = "לא נמצאו מקורות ישירים במאגר, ענה על בסיס הידע הכללי שלך."
+
+    except Exception as e:
+        logging.error(f"❌ RAG Error (Embedding/Pinecone): {e}")
+        # במקרה של תקלה בחיפוש, עדיין ננסה לענות רגיל
+        return summarize_with_gemini(user_query, phone_number, instruction_file, remember_history)
+
+    # שלב ד: הכנת הפרומפט המלא לג'מיני (עם המקורות)
+    instruction_text = load_instructions(instruction_file)
+    
+    # ניהול היסטוריה (זהה לפונקציות הקודמות)
+    os.makedirs("/tmp/conversations", exist_ok=True)
+    history_path = f"/tmp/conversations/{phone_number}.json"
+    history = {"messages": [], "last_updated": time.time()}
+
+    if remember_history and os.path.exists(history_path):
+        try:
+            with open(history_path, "r", encoding="utf-8") as f:
+                history = json.load(f)
+            if time.time() - history.get("last_updated", 0) > 1 * 3600:
+                history = {"messages": [], "last_updated": time.time()}
+        except Exception:
+            pass
+
+    # בניית ההודעה לג'מיני
+    history_str = ""
+    if history["messages"]:
+        history_str = "היסטוריית שיחה קודמת:\n" + "\n".join(history["messages"][-6:]) # לוקחים רק את האחרונות כדי לחסוך מקום
+
+    # הפרומפט החדש: הנחיות + מקורות מהמאגר + היסטוריה + השאלה החדשה
+    final_prompt = f"""
+{instruction_text}
+
+📚 **מקורות מידע (מהתלמוד/מאגר המידע) שיש להתבסס עליהם בתשובה:**
+{context_block}
+
+💬 {history_str}
+
+❓ **שאלה חדשה:**
+{user_query}
+
+אנא ענה על השאלה בהתבסס על המקורות המצורפים לעיל. אם התמלול נראה שגוי, נסה להבין את הכוונה לפי המקורות.
+"""
+
+    # שלב ה: שליחה לג'מיני
+    payload = {
+        "contents": [{"parts": [{"text": final_prompt}]}],
+        "generationConfig": {"temperature": 0.5, "max_output_tokens": 2000} # טמפרטורה נמוכה יותר לדיוק
+    }
+
+    API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent"
+    
+    for attempt in range(3):
+        try:
+            response = requests.post(f"{API_URL}?key={GEMINI_API_KEY}", json=payload, timeout=40)
+            
+            if response.status_code == 429:
+                time.sleep(5 * (attempt + 1))
+                continue
+
+            response.raise_for_status()
+            data = response.json()
+            result = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+            
+            if result:
+                if remember_history:
+                    history["messages"].append(f"שאלה: {user_query}")
+                    history["messages"].append(f"תשובה: {result}")
+                    history["messages"] = history["messages"][-20:]
+                    history["last_updated"] = time.time()
+                    with open(history_path, "w", encoding="utf-8") as f:
+                        json.dump(history, f, ensure_ascii=False, indent=2)
+                return result
+                
+        except Exception as e:
+            logging.error(f"Gemini RAG API error (attempt {attempt+1}): {e}")
+            time.sleep(1)
+
+    return "שגיאה בקבלת תשובה מהמערכת החכמה."
 
 
 # --- הפונקציה המקורית (משתמשת בגוגל) ---
@@ -369,76 +495,6 @@ def synthesize_with_google_tts(text: str) -> str:
     return output_path
 
 
-# --- ✅ פונקציה חדשה להקראה עם GEMINI TTS ---
-def synthesize_with_gemini_tts(text: str) -> str:
-    """
-    מבצע המרת טקסט לדיבור באמצעות המודל החדש של ג'מיני.
-    קול: Puck.
-    הנחיה: לקרוא מעט מהר ובצורה נעימה.
-    """
-    cleaned_text = clean_text_for_tts(text)
-    
-    # ב-Gemini TTS הניקוד האוטומטי מצוין, פחות צריך לקסיקון ידני, אבל נשתמש בניקוי ללא תגיות
-    final_text = apply_vowelized_lexicon_clean(cleaned_text)
-
-    logging.info(f"🎙️ Generating TTS with Gemini (Puck) for: {final_text[:30]}...")
-
-    try:
-        model = genai.GenerativeModel("models/gemini-2.5-flash-preview-tts")
-        
-        # ההנחיה המבוקשת
-        prompt = (
-            f"Please read the following text in Hebrew clearly and slightly fast. "
-            f"The delivery must maintain a 'Yeshivish' (ישיבתי) pronunciation and tone, "
-            f"but with a focus on quick, **straightforward recitation** (קריאה ישרה) "
-            f"and **minimal dramatic intonation**: {final_text}"
-        )
-
-        response = model.generate_content(
-            prompt,
-            generation_config={
-                "response_modalities": ["AUDIO"],
-                "speech_config": {
-                    "voice_config": {
-                        "prebuilt_voice_config": {
-                            "voice_name": "Puck" # 👈 הקול שנבחר
-                        }
-                    }
-                }
-            }
-        )
-
-        # 1. שמירת ה-PCM הגולמי שמגיע מג'מיני
-        pcm_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pcm").name
-        if response.candidates and response.candidates[0].content.parts:
-            with open(pcm_path, "wb") as f:
-                f.write(response.candidates[0].content.parts[0].inline_data.data)
-        else:
-            raise Exception("No audio data returned from Gemini")
-
-        # 2. המרה ל-WAV 8kHz עבור ימות המשיח באמצעות FFmpeg
-        wav_path = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
-        
-        # פקודת ההמרה: קלט 24k -> פלט 8k mono
-        command = [
-            'ffmpeg', '-f', 's16le', '-ar', '24000', '-ac', '1', '-i', pcm_path,
-            '-ar', '8000', '-ac', '1', '-f', 'wav', wav_path, '-y'
-        ]
-        
-        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
-        # ניקוי קובץ ה-PCM
-        os.remove(pcm_path)
-        
-        logging.info(f"✅ Gemini TTS file created and converted: {wav_path}")
-        return wav_path
-
-    except Exception as e:
-        logging.error(f"❌ Gemini TTS Error: {e}")
-        # במקרה חירום אפשר לזרוק שגיאה
-        raise e
-
-
 def upload_to_yemot(audio_path: str, yemot_full_path: str):
     url = "https://www.call2all.co.il/ym/api/UploadFile"
     path_no_file = os.path.dirname(yemot_full_path)
@@ -456,82 +512,57 @@ def upload_to_yemot(audio_path: str, yemot_full_path: str):
             return False
 
 
-# --- ✅ פונקציה חדשה לעדכון קובץ playfile.ini ---
+# --- פונקציה לעדכון קובץ playfile.ini ---
 def update_playfile_ini(phone_number: str):
-    """
-    יוצרת ומעדכנת את קובץ playfile.ini בתיקיית המשתמש.
-    זה מאפשר השמעת קבצים רציפה גם כשיש להם שמות טקסטואליים.
-    הפונקציה סורקת את הקבצים, ממיינת מהחדש לישן ויוצרת מיפוי (001, 002...).
-    """
     folder_path = f"{BASE_YEMOT_FOLDER}/{phone_number}"
     url_get_files = "https://www.call2all.co.il/ym/api/GetFiles"
     url_upload = "https://www.call2all.co.il/ym/api/UploadFile"
 
     try:
-        # 1. קבלת רשימת הקבצים הקיימים בתיקייה
         response = requests.get(url_get_files, params={"token": SYSTEM_TOKEN, "path": folder_path})
         data = response.json()
         
         if data.get("responseStatus") != "OK":
-            logging.warning(f"⚠️ Failed to get files from {folder_path}: {data}")
             return
 
         files_list = []
         if "files" in data:
             for file_info in data["files"]:
                 file_name = file_info.get("name", "")
-                # מסננים רק קבצי wav שאינם קבצי מערכת/הגדרות
                 if file_name.endswith(".wav") and not file_name.startswith("ext") and not file_name.startswith("playfile"):
                     files_list.append(file_name)
 
-        # מיון הקבצים מהחדש לישן (ההנחה: שמות הקבצים כוללים תאריך בפורמט YYYYMMDD)
-        # כך הקובץ האחרון שנוצר (התשובה הנוכחית) יהיה תמיד 001
         files_list.sort(reverse=True)
 
-        # 2. יצירת תוכן קובץ playfile.ini
-        # הפורמט: 001=filename1.wav, 002=filename2.wav וכו'
         ini_content = ""
         for index, file_name in enumerate(files_list):
             ini_content += f"{index + 1:03d}={file_name}\n"
 
         if not ini_content:
-            logging.info("ℹ️ No wav files found to index in playfile.ini")
             return
 
-        # 3. העלאת הקובץ המעודכן לשרת
         files = {"file": ("playfile.ini", ini_content.encode("utf-8"), "text/plain")}
         params = {"token": SYSTEM_TOKEN, "path": f"{folder_path}/playfile.ini"}
-        
-        upload_response = requests.post(url_upload, params=params, files=files)
-        upload_data = upload_response.json()
-        
-        if upload_data.get("responseStatus") == "OK":
-            logging.info(f"✅ Successfully updated playfile.ini in {folder_path}")
-        else:
-            logging.error(f"❌ Failed to update playfile.ini: {upload_data}")
+        requests.post(url_upload, params=params, files=files)
 
     except Exception as e:
         logging.error(f"❌ Error updating playfile.ini: {e}")
 
 
-# ✅ פונקציה חדשה לווידוא יצירת תיקייה אישית מוגדרת כהשמעת קבצים
+# ✅ פונקציה לווידוא יצירת תיקייה אישית
 def ensure_personal_folder_exists(phone_number: str):
-    """מוודא שתיקייה אישית קיימת ובעלת הגדרות השמעת קבצים."""
     folder_path = f"{BASE_YEMOT_FOLDER}/{phone_number}"
     url_check = "https://www.call2all.co.il/ym/api/GetFiles"
     url_upload = "https://www.call2all.co.il/ym/api/UploadFile"
 
-    # בדיקה אם קיימת
     try:
         response = requests.get(url_check, params={"token": SYSTEM_TOKEN, "path": folder_path})
         data = response.json()
         if data.get("responseStatus") == "OK":
-            logging.info(f"📁 Personal folder {folder_path} already exists.")
             return
-    except Exception as e:
-        logging.warning(f"⚠️ Could not verify if folder exists: {e}")
+    except Exception:
+        pass
 
-    # יצירה עם ext.ini
     ext_ini_content = """type=playfile
 sayfile=yes
 allow_download=yes
@@ -545,47 +576,21 @@ playfile_end_goto=/11
 """
     files = {"file": ("ext.ini", ext_ini_content.encode("utf-8"), "text/plain")}
     params = {"token": SYSTEM_TOKEN, "path": f"{folder_path}/ext.ini"}
-
-    time.sleep(0.5)  # אם באמת צריך השהייה
-    
-    try:
-        response = requests.post(url_upload, params=params, files=files)
-        data = response.json()
-        if data.get("responseStatus") == "OK":
-            logging.info(f"✅ Created and configured personal folder {folder_path}.")
-        else:
-            logging.warning(f"⚠️ Failed to create personal folder {folder_path}: {data}")
-    except Exception as e:
-        logging.error(f"❌ Error creating personal folder {folder_path}: {e}")
+    requests.post(url_upload, params=params, files=files)
 
 
-# --- פונקציית עזר חדשה לשליחת מייל (Brevo API) ---
+# --- פונקציית עזר לשליחת מייל ---
 def send_email(to_address: str, subject: str, body: str) -> bool:
-    """שולח מייל עם התוכן הנתון באמצעות Brevo (Sendinblue) HTTP API."""
-    
     BREVO_API_KEY = os.getenv("BREVO_API_KEY")
-    
     if not all([BREVO_API_KEY, EMAIL_USER, to_address]):
-        logging.error("❌ Brevo configuration is incomplete (API Key or EMAIL_USER missing).")
         return False
     
-    logging.info(f"Sending email via Brevo API to {to_address} from {EMAIL_USER}")
-
     try:
-        # כתובת ה-API של Brevo
         api_url = "https://api.brevo.com/v3/smtp/email"
-        
-        # --- כאן התיקון ל-RTL, הדגשה וטקסט קבוע ---
-        
-        # 1. המרת שורות חדשות לתגי <br> של HTML, וניקוי גוף ההודעה
-        # (התיקון של ה-SyntaxError נמצא כאן)
         nl = '\n'
         html_body = body.replace(nl, '<br>')
-        
-        # 2. הוספת טקסט קבוע בסוף המייל
         fixed_footer = "<br><br>---<br><b>תודה על השימוש בשירות.</b>"
         
-        # 3. הגדרת כותרות מודגשות ומוגדלות (באמצעות תגי <h2>) (שינוי גודל גופן)
         html_content = f"""
         <html>
         <head>
@@ -598,23 +603,18 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
         <body dir="rtl">
             <p>שלום,</p>
             <p>התקבל תמלול וסיכום משיחה נכנסת.</p>
-            
             <h2>**פרטי השיחה**</h2>
             <p>{html_body}</p>
-            
             {fixed_footer}
         </body>
         </html>
         """
 
-        # 4. התאמת ה-body להצבה ב-HTML
-        # מחליפים את הכותרות ב-body לתגי <h2> ואת הקוים ב-HTML
         body_for_html = body
         body_for_html = body_for_html.replace('-----------------------------------', '<hr>')
         body_for_html = body_for_html.replace('תמלול ההקלטה האחרונה:', '<h2>תמלול ההקלטה האחרונה:</h2>')
         body_for_html = body_for_html.replace('סיכום מלא:', '<h2>סיכום מלא:</h2>')
         
-        # בנייה מחדש של גוף המייל (כדי שיוצב נכון) (שינוי גודל גופן)
         html_content = f"""
         <html>
         <head>
@@ -628,55 +628,33 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
         <body dir="rtl">
             <p>שלום,</p>
             <p>התקבל תמלול וסיכום משיחה נכנסת.</p>
-            
             {body_for_html.replace(nl, '<br>')}
-            
             <hr>
             <p><b>תודה על השימוש בשירות.</b></p>
         </body>
         </html>
         """
-        # --- סוף התיקון ---
 
-        # הרכבת ה-Payload (הנתונים הנשלחים)
         payload = {
-            "sender": {
-                "email": EMAIL_USER,
-                "name": EMAIL_SENDER_NAME
-            },
-            "to": [
-                {
-                    "email": to_address
-                }
-            ],
+            "sender": {"email": EMAIL_USER, "name": EMAIL_SENDER_NAME},
+            "to": [{"email": to_address}],
             "subject": subject,
-            "htmlContent": html_content # שימוש ב-HTML במקום טקסט רגיל
+            "htmlContent": html_content
         }
         
-        # הרכבת ה-Headers
         headers = {
             "accept": "application/json",
             "api-key": BREVO_API_KEY,
             "content-type": "application/json"
         }
         
-        # ביצוע בקשת ה-HTTP POST
         response = requests.post(api_url, json=payload, headers=headers)
-        
-        data = response.json()
-
-        if response.status_code == 201: # 201 Creado הוא סטטוס ההצלחה של Brevo
-            logging.info(f"✅ Email sent successfully via Brevo API (Status: 201, MessageID: {data.get('messageId')})")
+        if response.status_code == 201:
             return True
         else:
-            logging.error(f"❌ Failed to send email via Brevo API (Status: {response.status_code})")
-            logging.error(f"❌ Brevo Response: {data}")
-            error_msg = data.get("message")
-            logging.error(f"❌ Brevo Error Message: {error_msg}")
             return False
             
-    except Exception as e:
-        logging.error(f"❌ Failed to send email (Brevo General Exception): {e}") 
+    except Exception:
         return False
 
 
@@ -689,69 +667,49 @@ def health():
     return Response("OK", status=200, mimetype="text/plain")
 
 
-# --- 🆕 Route לעדכון מייל ע"י המשתמש (עבור שלוחה ייעודית) ---
 @app.route("/update_email", methods=["GET"])
 def update_email():
     phone = request.args.get("ApiPhone")
-    # בימות המשיח מגדירים שהקלט ייכנס למשתנה בשם USER_EMAIL
     new_email = request.args.get("USER_EMAIL")
     
     if phone and new_email:
-        # ניקוי המייל מתווים לא רצויים
         new_email = new_email.strip()
         save_user_email(phone, new_email)
-        # החזרת תשובה לימות: השמעה ומעבר
-        return Response("id_list_message=t-המייל עודכן בהצלחה במערכת&go_to_folder=/7", mimetype="text/plain")
+        return Response("id_list_message=t-המייל עודכן בהצלחה במערכת&go_to_folder=/8", mimetype="text/plain")
     
-    return Response("id_list_message=t-אירעה שגיאה בקליטת המייל&go_to_folder=/7", mimetype="text/plain")
+    return Response("id_list_message=t-אירעה שגיאה בקליטת המייל&go_to_folder=/8", mimetype="text/plain")
 
 
-# --- 🆕 Route לבדיקת קיום מייל לפני הקלטה ---
 @app.route("/check_email_exists", methods=["GET"])
 def check_email_exists():
     phone = request.args.get("ApiPhone")
     email = get_user_email(phone)
-
-    # נניח שתיקיית ההקלטה היא 9715 (לפי השיחה הקודמת)
-    RECORDING_FOLDER = "/7"
-    # נניח שתיקיית הגדרת המייל היא 8
-    EMAIL_SETUP_FOLDER = "/6"
+    RECORDING_FOLDER = "/9715"
+    EMAIL_SETUP_FOLDER = "/8"
 
     if email:
-        # יש מייל - העבר לתיקיית ההקלטה
         return Response(f"go_to_folder={RECORDING_FOLDER}", mimetype="text/plain")
     else:
-        # אין מייל - השמע הודעה והעבר להגדרה
         return Response(f"id_list_message=t-לא מוגדרת כתובת מייל עבור הטלפון שלכם. הנכם מועברים להגדרת הכתובת.&go_to_folder={EMAIL_SETUP_FOLDER}", mimetype="text/plain")
 
 
-# --- הפונקציה המקורית: משתמשת ב-Google TTS ---
+# --- הפונקציה המקורית: שיחה קולית (אודיו לאודיו) ---
 def process_audio_request(request, remember_history: bool, instruction_file: str):
     file_url = request.args.get("file_url")
-    call_id = request.args.get("ApiCallId", str(int(time.time())))
     phone_number = request.args.get("ApiPhone", "unknown")
 
-    # ------------------ תוספת: מחיקת היסטוריה קודמת בנושא חדש ------------------
     if not remember_history:
-        # הבקשה הגיעה מ /upload_audio_new
-        # 1. נמחק את ההיסטוריה הישנה של מספר זה
         history_path = f"/tmp/conversations/{phone_number}.json"
         if os.path.exists(history_path):
             try:
                 os.remove(history_path)
-                logging.info(f"🗑️ נמחקה היסטוריה ישנה עבור {phone_number} (נושא חדש).")
-            except Exception as e:
-                logging.warning(f"⚠️ לא ניתן היה למחוק קובץ היסטוריה ישן {history_path}: {e}")
-        
-        # 2. נקבע שהשיחה הנוכחית כן תישמר כהתחלה של ההיסטוריה החדשה
-        # לכן, אנו דורסים את המשתנה ל-True עבור המשך הריצה של פונקציה זו
+            except Exception:
+                pass
         remember_history = True
-    # ------------------ סוף התוספת ------------------
 
     if not file_url.startswith("http"):
         file_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={SYSTEM_TOKEN}&path=ivr2:/{file_url}"
 
-    logging.info(f"Downloading audio from: {file_url}")
     try:
         response = requests.get(file_url, timeout=20)
         response.raise_for_status()
@@ -759,20 +717,12 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
             temp_input.write(response.content)
             temp_input.flush()
             
-            # ✅ בדיקת שקט (Silence Check)
             if is_audio_quiet(temp_input.name):
-                logging.info("🔇 Audio is too quiet. Returning warning to user.")
                 return Response("id_list_message=t-הקובץ שקט מדי, אנא נסו להקליט שוב&go_to_folder=/8/6", mimetype="text/plain")
 
-            processed_audio = add_silence(temp_input.name)
-            
-            # כאן השינוי היחיד: דילוג על recognize_speech ושימוש בפונקציה הישירה
-            # recognized_text = recognize_speech(processed_audio) <-- מבוטל
-            
             gemini_result_text = ""
             def run_gemini():
                 nonlocal gemini_result_text
-                # שימוש בפונקציה החדשה שמקבלת את קובץ האודיו ישירות
                 gemini_result_text = run_gemini_audio_direct(temp_input.name, phone_number, instruction_file, remember_history)
             
             gemini_thread = threading.Thread(target=run_gemini)
@@ -781,25 +731,20 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
 
             final_dvartorah = gemini_result_text
             
-            # מכאן זה ממשיך רגיל: יצירת קובץ שמע (TTS) והעלאה, כפי שביקשת
             tts_path = synthesize_with_google_tts(final_dvartorah)
 
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             personal_folder = f"{BASE_YEMOT_FOLDER}/{phone_number}"
             yemot_full_path = f"{personal_folder}/dvartorah_{timestamp}.wav"
 
-            # 🟩 קריאה לפונקציה שמוודאת שהתיקייה האישית קיימת ומוגדרת להשמעת קבצים
             ensure_personal_folder_exists(phone_number)
 
             upload_success = upload_to_yemot(tts_path, yemot_full_path)
             os.remove(tts_path)
 
             if upload_success:
-                # עדכון קובץ ה-ini עבור רציפות השמעה
                 update_playfile_ini(phone_number)
-                
                 playback_command = f"go_to_folder_and_play=/85/{phone_number},dvartorah_{timestamp}.wav,0.go_to_folder=/8/6"
-                logging.info(f"Returning IVR command: {playback_command}")
                 return Response(playback_command, mimetype="text/plain")
             else:
                 return Response("שגיאה בהעלאת הקובץ לשרת.", mimetype="text/plain")
@@ -808,27 +753,26 @@ def process_audio_request(request, remember_history: bool, instruction_file: str
         return Response(f"שגיאה קריטית בעיבוד: {e}", mimetype="text/plain")
 
 
-# --- ✅ פונקציה חדשה: משתמשת ב-Gemini TTS (משוכפלת למניעת שינוי בקוד המקורי) ---
-def process_audio_request_gemini(request, remember_history: bool, instruction_file: str):
+# --- ✅ פונקציה חדשה: תמלול טקסט (Google STT -> RAG -> Google TTS) ---
+def process_audio_request_transcript(request, remember_history: bool, instruction_file: str):
     file_url = request.args.get("file_url")
-    call_id = request.args.get("ApiCallId", str(int(time.time())))
     phone_number = request.args.get("ApiPhone", "unknown")
 
+    # ניהול היסטוריה: אם זו שיחה חדשה, נמחק היסטוריה ישנה
     if not remember_history:
         history_path = f"/tmp/conversations/{phone_number}.json"
         if os.path.exists(history_path):
             try:
                 os.remove(history_path)
-                logging.info(f"🗑️ נמחקה היסטוריה ישנה עבור {phone_number} (נושא חדש - ג'מיני).")
-            except Exception as e:
-                logging.warning(f"⚠️ לא ניתן היה למחוק קובץ היסטוריה ישן {history_path}: {e}")
-        
-        remember_history = True
+                logging.info(f"🗑️ נמחקה היסטוריה ישנה עבור {phone_number} (נושא חדש - תמלול).")
+            except Exception:
+                pass
+        remember_history = True # ועכשיו נזכור את ההמשך
 
     if not file_url.startswith("http"):
         file_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={SYSTEM_TOKEN}&path=ivr2:/{file_url}"
 
-    logging.info(f"Downloading audio from: {file_url} (For Gemini TTS)")
+    logging.info(f"Downloading audio from: {file_url} (For Transcript RAG)")
     try:
         response = requests.get(file_url, timeout=20)
         response.raise_for_status()
@@ -836,24 +780,33 @@ def process_audio_request_gemini(request, remember_history: bool, instruction_fi
             temp_input.write(response.content)
             temp_input.flush()
             
-            # ✅ בדיקת שקט (Silence Check) - גם כאן
+            # בדיקת שקט
             if is_audio_quiet(temp_input.name):
-                logging.info("🔇 Audio is too quiet. Returning warning to user.")
                 return Response("id_list_message=t-הקובץ שקט מדי, אנא נסו להקליט שוב&go_to_folder=/8/6", mimetype="text/plain")
 
-            gemini_result_text = ""
-            def run_gemini():
-                nonlocal gemini_result_text
-                gemini_result_text = run_gemini_audio_direct(temp_input.name, phone_number, instruction_file, remember_history)
+            processed_audio = add_silence(temp_input.name)
             
-            gemini_thread = threading.Thread(target=run_gemini)
+            # 1. תמלול (STT) - המרת שאלת המאזין לטקסט
+            recognized_text = recognize_speech(processed_audio)
+            
+            if not recognized_text:
+                 return Response("id_list_message=t-לא הצלחתי להבין את הנאמר, אנא נסו שוב.&go_to_folder=/8/6", mimetype="text/plain")
+
+            # 2. שליחת הטקסט למנגנון ה-RAG החדש (חיפוש בבסיס ידע + ג'מיני)
+            gemini_result_text = ""
+            def run_rag_logic():
+                nonlocal gemini_result_text
+                # ✅ כאן השינוי הגדול: שימוש בפונקציה החדשה generate_rag_response
+                gemini_result_text = generate_rag_response(recognized_text, phone_number, instruction_file, remember_history)
+            
+            gemini_thread = threading.Thread(target=run_rag_logic)
             gemini_thread.start()
             gemini_thread.join()
 
-            final_dvartorah = gemini_result_text
+            final_response = gemini_result_text
             
-            # 🟩 כאן השינוי: שימוש ב-Gemini TTS במקום Google Cloud TTS
-            tts_path = synthesize_with_gemini_tts(final_dvartorah)
+            # 3. המרת תשובת ג'מיני לקובץ שמע (TTS) של גוגל
+            tts_path = synthesize_with_google_tts(final_response)
 
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             personal_folder = f"{BASE_YEMOT_FOLDER}/{phone_number}"
@@ -865,16 +818,13 @@ def process_audio_request_gemini(request, remember_history: bool, instruction_fi
             os.remove(tts_path)
 
             if upload_success:
-                # עדכון קובץ ה-ini עבור רציפות השמעה
                 update_playfile_ini(phone_number)
-                
                 playback_command = f"go_to_folder_and_play=/85/{phone_number},dvartorah_{timestamp}.wav,0.go_to_folder=/8/6"
-                logging.info(f"Returning IVR command: {playback_command}")
                 return Response(playback_command, mimetype="text/plain")
             else:
                 return Response("שגיאה בהעלאת הקובץ לשרת.", mimetype="text/plain")
     except Exception as e:
-        logging.error(f"Critical error (Gemini Route): {e}")
+        logging.error(f"Critical error (Transcript Route): {e}")
         return Response(f"שגיאה קריטית בעיבוד: {e}", mimetype="text/plain")
 
 
@@ -888,51 +838,37 @@ def upload_audio_new():
     return process_audio_request(request, remember_history=False, instruction_file=INSTRUCTIONS_NEW_FILE)
 
 
-# --- ✅ Routes חדשים עבור Gemini TTS ---
-@app.route("/upload_audio_gemini_new", methods=["GET"])
-def upload_audio_gemini_new():
-    """מסלול לשיחה חדשה המשתמש בקול של ג'מיני (Puck)"""
-    return process_audio_request_gemini(request, remember_history=False, instruction_file=INSTRUCTIONS_NEW_FILE)
+# --- ✅ Routes חדשים עבור תמלול טקסט (שיחה מבוססת טקסט) ---
+@app.route("/upload_audio_transcript_new", methods=["GET"])
+def upload_audio_transcript_new():
+    """מסלול לשיחה חדשה מבוססת תמלול טקסט (עם חיבור לידע)"""
+    return process_audio_request_transcript(request, remember_history=False, instruction_file=INSTRUCTIONS_TRANSCRIPT_NEW_FILE)
 
-@app.route("/upload_audio_gemini_continue", methods=["GET"])
-def upload_audio_gemini_continue():
-    """מסלול להמשך שיחה המשתמש בקול של ג'מיני (Puck)"""
-    return process_audio_request_gemini(request, remember_history=True, instruction_file=INSTRUCTIONS_CONTINUE_FILE)
+@app.route("/upload_audio_transcript_continue", methods=["GET"])
+def upload_audio_transcript_continue():
+    """מסלול להמשך שיחה מבוססת תמלול טקסט (עם חיבור לידע)"""
+    return process_audio_request_transcript(request, remember_history=True, instruction_file=INSTRUCTIONS_TRANSCRIPT_CONTINUE_FILE)
 
-
-# --- פונקציה ו-route לשליחת מייל ---
 
 def process_audio_for_email(request):
-    """
-    מבצע תמלול וסיכום, ושולח אותם במייל ללא הקראה.
-    """
     file_url = request.args.get("file_url")
-    call_id = request.args.get("ApiCallId", str(int(time.time())))
     phone_number = request.args.get("ApiPhone", "unknown")
-    # נסיון למשוך מייל ברירת מחדל, אבל הלוגיקה האמיתית למטה
     
     if not file_url:
-        logging.error("❌ שגיאת הגדרה: פרמטר 'file_url' חסר.")
         return Response("id_list_message=t-שגיאת הגדרה חמורה במערכת, הקלטה לא התקבלה. אנא פנה למנהל.go_to_folder=/8/6", mimetype="text/plain")
 
-    # ✅ בדיקה אם קיים מייל שמור למשתמש
     saved_email = get_user_email(phone_number)
     if saved_email:
         email_to = saved_email
-        logging.info(f"📧 Found saved email for {phone_number}: {email_to}")
     else:
-        # אם אין שמור, לוקחים מפרמטר ה-API או ברירת מחדל
         email_to = request.args.get("ApiEmail", DEFAULT_EMAIL_RECEIVER)
-        logging.info(f"ℹ️ No saved email for {phone_number}, using default/param: {email_to}")
 
     if not email_to:
-        logging.warning("⚠️ No email address provided. Aborting email send.")
         return Response("id_list_message=t-שגיאה, לא הוגדרה כתובת מייל לשליחה.go_to_folder=/8/6", mimetype="text/plain")
 
     if not file_url.startswith("http"):
         file_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={SYSTEM_TOKEN}&path=ivr2:/{file_url}"
 
-    logging.info(f"Downloading audio for email processing from: {file_url}")
     try:
         response = requests.get(file_url, timeout=20)
         response.raise_for_status()
@@ -940,53 +876,38 @@ def process_audio_for_email(request):
             temp_input.write(response.content)
             temp_input.flush()
             
-            # ✅ בדיקת שקט (Silence Check) - גם במייל
             if is_audio_quiet(temp_input.name):
-                logging.info("🔇 Audio is too quiet. Aborting email send.")
                 return Response("id_list_message=t-הקובץ שקט מדי, אנא נסו להקליט שוב&go_to_folder=/8/6", mimetype="text/plain")
 
             processed_audio = add_silence(temp_input.name)
-            
-            # 1. ביצוע תמלול (STT) - נשאר למייל כדי שיהיה טקסט מקור
             recognized_text = recognize_speech(processed_audio)
             if not recognized_text:
                 return Response("לא זוהה דיבור ברור. אנא נסה שוב.", mimetype="text/plain")
 
-            # 2. ביצוע סיכום Gemini (תוך שימוש בהיסטוריה הקיימת)
             gemini_result = {}
             def run_gemini():
-                # --- כאן השינוי ---
-                # שימוש בקובץ הנחיות ייעודי למייל
+                # שימוש בפונקציה הרגילה עבור מיילים (ללא מאגר ידע, רק סיכום)
                 gemini_result["text"] = summarize_with_gemini(recognized_text, phone_number, INSTRUCTIONS_EMAIL_FILE, remember_history=False)
-                # --- סוף השינוי ---
             gemini_thread = threading.Thread(target=run_gemini)
             gemini_thread.start()
             gemini_thread.join()
 
             final_dvartorah_summary = gemini_result.get("text", "לא נוצר סיכום.")
 
-            # 3. הכנת תוכן המייל
             subject = f"סיכום שיחה חדש:"
-            # --- בניית גוף ההודעה עם תגי HTML לצורך הדגשה וגודל ---
             body_content = f"""
-
-
 <hr>
 <h2>תמלול ההקלטה האחרונה:</h2>
 <p>{recognized_text}</p>
-
 <hr>
 <h2>סיכום מלא:</h2>
 <p>{final_dvartorah_summary}</p>
 """
-            # 4. שליחת המייל
             email_success = send_email(email_to, subject, body_content)
 
             if email_success:
-                logging.info(f"✅ Email sent. Returning success message to Yemot.")
                 return Response("id_list_message=t-ההודעה נשלחה בהצלחה למייל&go_to_folder=/", mimetype="text/plain")
             else:
-                logging.error(f"❌ Email failed. Returning error message to Yemot.")
                 return Response("id_list_message=t-שגיאה בשליחת המייל, אנא נסה שוב.go_to_folder=/", mimetype="text/plain")
 
     except Exception as e:
@@ -995,10 +916,6 @@ def process_audio_for_email(request):
 
 @app.route("/upload_audio_to_email", methods=["GET"])
 def upload_audio_to_email():
-    """
-    כתובת חדשה שמקבלת הקלטה, מתמללת, מסכמת ושולחת במייל
-    ללא הקראה או שמירה בימות.
-    """
     return process_audio_for_email(request)
 
 
