@@ -180,16 +180,24 @@ def apply_vowelized_lexicon(text: str) -> str:
         processed_text = re.sub(pattern, vowelized, processed_text)
     return f'<speak lang="he-IL">{processed_text}</speak>'
 
-# --- פונקציית עזר לניקוי ניקוד וסימני פיסוק ---
+# --- פונקציית עזר לניקוי ניקוד וסימני פיסוק (מתוקנת!) ---
 def normalize_text_for_search(text):
     """מסירה ניקוד עברי וסימני פיסוק כדי לאפשר השוואה חלקה."""
     if not text: return ""
-    # הסרת ניקוד (0591-05C7)
-    no_nikud = re.sub(r'[\u0591-\u05C7]', '', text)
-    # הסרת פיסוק (משאירים רק אותיות ומספרים ורווחים)
-    clean = re.sub(r'[^\w\s]', '', no_nikud)
-    # צמצום רווחים כפולים
+    
+    # 1. הסרת תגיות HTML (כמו <big>, <b>)
+    text_no_html = re.sub(r'<[^<]+?>', ' ', text) 
+    
+    # 2. הסרת ניקוד (0591-05C7)
+    no_nikud = re.sub(r'[\u0591-\u05C7]', '', text_no_html)
+    
+    # 3. הסרת פיסוק (החלפה ברווח ולא במחיקה, כדי לא להצמיד מילים)
+    # משאירים רק אותיות בעברית/אנגלית, מספרים ורווחים
+    clean = re.sub(r'[^\w\s]', ' ', no_nikud)
+    
+    # 4. צמצום רווחים כפולים
     clean = re.sub(r'\s+', ' ', clean).strip()
+    
     return clean
 
 # --- ניהול משתמשים ומיילים ---
@@ -338,7 +346,7 @@ def analyze_audio_for_rag(audio_path):
 def generate_rag_response(transcript: str, search_term: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
     """
     מקבל את התמלול ומילת החיפוש.
-    מבצע חיפוש רחב ב-Pinecone (400 תוצאות) ואז מפעיל אלגוריתם דירוג גמיש.
+    מבצע חיפוש רחב ב-Pinecone (500 תוצאות) ואז מפעיל אלגוריתם דירוג גמיש.
     """
     if not transcript or not GEMINI_API_KEY:
         return "שגיאה: חסר טקסט."
@@ -359,32 +367,36 @@ def generate_rag_response(transcript: str, search_term: str, phone_number: str, 
         )
         query_vector = embedding_result['embedding']
 
-        # שלב ב: חיפוש רחב מאוד - הוגדל ל-300 כדי לתפוס גם את מסכת סוכה
+        # שלב ב: חיפוש רחב מאוד - הוגדל ל-500 כדי לתפוס גם מקורות חלשים מתמטית
         pc = Pinecone(api_key=PINECONE_API_KEY)
         index = pc.Index(PINECONE_INDEX_NAME)
         
         search_results = index.query(
             vector=query_vector,
-            top_k=300, 
+            top_k=500, 
             include_metadata=True
         )
 
-        # 🚀 שלב ג: סינון ודירוג מחדש (Re-ranking) גמיש (Proximity Search)
         matches = search_results['matches']
+        
+        # הדפסת רשימת ה-ID של התוצאות הראשונות הגולמיות מ-Pinecone (לבדיקה)
+        raw_top_ids = [m['id'] for m in matches[:10]]
+        logging.info(f"🔎 Raw Pinecone Top 10: {raw_top_ids}")
+
         search_words = optimized_query.split()
         
+        # 🚀 שלב ג: סינון ודירוג מחדש (Re-ranking) גמיש (Proximity Search)
         for match in matches:
             original_text = match.get('metadata', {}).get('text', '')
-            clean_text = normalize_text_for_search(original_text) # ניקוי ניקוד ופיסוק
+            clean_text = normalize_text_for_search(original_text) # ניקוי ניקוד, פיסוק ותגיות HTML
             text_words = clean_text.split()
             
             bonus_score = 0
             
             # 1. חיפוש גמיש: מילים המופיעות בקרבה (Proximity)
-            # בודקים אם מילה מהשאילתה מופיעה בטקסט, ואם המילה הבאה בשאילתה מופיעה בטווח של 3 מילים אחריה
             proximity_matches = 0
             if len(search_words) > 1:
-                # מיפוי מיקומים של כל מילה בטקסט המנוקה
+                # מיפוי מיקומים
                 word_positions = {}
                 for idx, word in enumerate(text_words):
                     if word not in word_positions:
@@ -397,16 +409,15 @@ def generate_rag_response(transcript: str, search_term: str, phone_number: str, 
                     word2 = search_words[i+1]
                     
                     if word1 in word_positions and word2 in word_positions:
-                        # בודקים אם יש מופע של word2 אחרי word1 במרחק סביר (עד 3 מילים)
                         for pos1 in word_positions[word1]:
                             for pos2 in word_positions[word2]:
                                 dist = pos2 - pos1
-                                if 0 < dist <= 4: # מרחק של 1-4 מילים (מאפשר "סוכה שהיא גבוהה")
+                                if 0 < dist <= 4: # מרחק של 1-4 מילים
                                     proximity_matches += 1
-                                    break # מצאנו זוג כזה, עוברים לזוג הבא
+                                    break 
             
             if proximity_matches > 0:
-                bonus_score += proximity_matches * 1.5 # בונוס משמעותי על קרבה
+                bonus_score += proximity_matches * 2.0 # בונוס מוגדל
                 logging.info(f"🔗 Proximity Match in {match.get('id')}: {proximity_matches} pairs")
 
             # 2. בונוס על אחוז מילים (Coverage)
@@ -414,7 +425,7 @@ def generate_rag_response(transcript: str, search_term: str, phone_number: str, 
             coverage = found_words_count / len(search_words) if search_words else 0
             
             if coverage >= 0.8: 
-                bonus_score += 3.0 # בונוס ענק אם כמעט כל המילים נמצאות
+                bonus_score += 3.0 
             elif coverage > 0.5:
                 bonus_score += 1.0
             
@@ -432,8 +443,8 @@ def generate_rag_response(transcript: str, search_term: str, phone_number: str, 
                 source_id = match['id'] if 'id' in match else "מקור"
                 
                 # הדפסת קטע מהטקסט ללוג כדי שנוכל לראות מה המערכת בחרה
-                snippet = source_text[:100].replace('\n', ' ')
-                logging.info(f"✅ CHOSEN: {source_id} (Score: {match['_adjusted_score']:.2f}) -> Text: {snippet}...")
+                snippet = normalize_text_for_search(source_text)[:100]
+                logging.info(f"✅ CHOSEN: {source_id} (Score: {match['_adjusted_score']:.2f}) -> Clean Text: {snippet}...")
                 
                 retrieved_contexts.append(f"--- מקור ({source_id}) ---\n{source_text}")
 
