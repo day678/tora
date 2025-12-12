@@ -7,6 +7,7 @@ import time
 import requests
 import threading
 import re
+import difflib  # 🆕 ספרייה לזיהוי דמיון בין מחרוזות
 import google.generativeai as genai 
 from flask import Flask, request, Response
 from pydub import AudioSegment
@@ -276,7 +277,7 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
             time.sleep(1)
     return "שגיאה בקבלת תשובה מג'מיני."
 
-# --- 🆕 פונקציה משופרת: ניתוח אודיו עם הפקת שני סוגי חיפוש ---
+# --- פונקציה לניתוח אודיו ---
 def analyze_audio_for_rag(audio_path):
     if not GEMINI_API_KEY:
         return None
@@ -286,7 +287,6 @@ def analyze_audio_for_rag(audio_path):
             audio_data = f.read()
         audio_b64 = base64.b64encode(audio_data).decode("utf-8")
         
-        # 🚀 מבקשים שני דברים שונים: ציטוט מדויק וחיפוש נושא כללי
         prompt = """
         אתה מומחה לתלמוד. האזן לשאלה.
         עליך להפיק פלט JSON עם שלושה שדות:
@@ -345,21 +345,21 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
         pc = Pinecone(api_key=PINECONE_API_KEY)
         index = pc.Index(PINECONE_INDEX_NAME)
         
-        all_matches = {} # מילון למניעת כפילויות לפי ID
+        all_matches = {}
 
-        # --- חיפוש 1: לפי ציטוט מדויק ---
+        # --- חיפוש 1: לפי ציטוט מדויק (מורחב ל-1000) ---
         if exact_term:
             vec_exact = genai.embed_content(model="models/text-embedding-004", content=exact_term, task_type="retrieval_query")['embedding']
-            res_exact = index.query(vector=vec_exact, top_k=150, include_metadata=True) # 150 תוצאות
+            # הרחבה ל-1000 כדי לתפוס מסמכים גדולים שהרלוונטיות שלהם מדוללת
+            res_exact = index.query(vector=vec_exact, top_k=1000, include_metadata=True) 
             for m in res_exact['matches']:
                 all_matches[m['id']] = m
 
-        # --- חיפוש 2: לפי קונספט (נושא) ---
+        # --- חיפוש 2: לפי קונספט (מורחב ל-1000) ---
         if concept_term:
             vec_concept = genai.embed_content(model="models/text-embedding-004", content=concept_term, task_type="retrieval_query")['embedding']
-            res_concept = index.query(vector=vec_concept, top_k=150, include_metadata=True) # 150 תוצאות
+            res_concept = index.query(vector=vec_concept, top_k=1000, include_metadata=True) 
             for m in res_concept['matches']:
-                # אם קיים כבר, נשמור את הגבוה מבין השניים (או פשוט נדרוס, זה לא קריטי כי ה-Re-rank קובע)
                 if m['id'] not in all_matches:
                     all_matches[m['id']] = m
 
@@ -368,41 +368,37 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
 
         search_words = optimized_query_for_rerank.split()
         
-        # 🚀 שלב הדירוג מחדש (Re-ranking) על הרשימה המאוחדת
+        # 🚀 שלב הדירוג מחדש (Re-ranking)
         for match in matches_list:
             original_text = match.get('metadata', {}).get('text', '')
             clean_text = normalize_text_for_search(original_text)
-            text_words = clean_text.split()
             
             bonus_score = 0
             
-            # 1. חיפוש גמיש (Proximity)
-            proximity_matches = 0
-            if len(search_words) > 1:
-                word_positions = {}
-                for idx, word in enumerate(text_words):
-                    if word not in word_positions: word_positions[word] = []
-                    word_positions[word].append(idx)
-                
-                for i in range(len(search_words) - 1):
-                    word1 = search_words[i]
-                    word2 = search_words[i+1]
-                    if word1 in word_positions and word2 in word_positions:
-                        for pos1 in word_positions[word1]:
-                            for pos2 in word_positions[word2]:
-                                if 0 < (pos2 - pos1) <= 4:
-                                    proximity_matches += 1
-                                    break
-            
-            if proximity_matches > 0:
-                bonus_score += proximity_matches * 2.5 
-                logging.info(f"🔗 Proximity Match in {match.get('id')}: {proximity_matches}")
-
-            # 2. בונוס כיסוי מילים
-            found_cnt = sum(1 for w in search_words if w in text_words)
-            coverage = found_cnt / len(search_words) if search_words else 0
-            if coverage >= 0.8: bonus_score += 3.0
-            elif coverage > 0.5: bonus_score += 1.0
+            # בדיקת דמיון רצף חכם (SequenceMatcher)
+            # בודק אם הביטוי מופיע בטקסט (אפילו עם שינויים קלים)
+            if exact_term:
+                clean_search = normalize_text_for_search(exact_term)
+                # אם הביטוי קצר יחסית (פחות מ-100 תווים), נבדוק אם הוא נמצא
+                if len(clean_search) > 5 and clean_search in clean_text:
+                     bonus_score += 10.0 # בונוס מוחלט! מצאנו את הציטוט
+                     logging.info(f"🏆 EXACT PHRASE MATCH in {match.get('id')}! (+10.0)")
+                else:
+                    # בדיקה "מרוככת" - האם רוב המילים נמצאות קרוב אחת לשנייה?
+                    text_words = clean_text.split()
+                    search_words_list = clean_search.split()
+                    
+                    found_words_count = 0
+                    for sw in search_words_list:
+                        if sw in text_words:
+                            found_words_count += 1
+                    
+                    coverage = found_words_count / len(search_words_list) if search_words_list else 0
+                    
+                    if coverage > 0.9: # 90% מהמילים נמצאות
+                        bonus_score += 5.0
+                    elif coverage > 0.7:
+                        bonus_score += 2.0
             
             match['_adjusted_score'] = (match.get('score', 0) or 0) + bonus_score
 
