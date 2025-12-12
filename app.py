@@ -180,24 +180,14 @@ def apply_vowelized_lexicon(text: str) -> str:
         processed_text = re.sub(pattern, vowelized, processed_text)
     return f'<speak lang="he-IL">{processed_text}</speak>'
 
-# --- פונקציית עזר לניקוי ניקוד וסימני פיסוק (מתוקנת!) ---
+# --- פונקציית עזר לניקוי ניקוד וסימני פיסוק ---
 def normalize_text_for_search(text):
     """מסירה ניקוד עברי וסימני פיסוק כדי לאפשר השוואה חלקה."""
     if not text: return ""
-    
-    # 1. הסרת תגיות HTML (כמו <big>, <b>)
     text_no_html = re.sub(r'<[^<]+?>', ' ', text) 
-    
-    # 2. הסרת ניקוד (0591-05C7)
     no_nikud = re.sub(r'[\u0591-\u05C7]', '', text_no_html)
-    
-    # 3. הסרת פיסוק (החלפה ברווח ולא במחיקה, כדי לא להצמיד מילים)
-    # משאירים רק אותיות בעברית/אנגלית, מספרים ורווחים
     clean = re.sub(r'[^\w\s]', ' ', no_nikud)
-    
-    # 4. צמצום רווחים כפולים
     clean = re.sub(r'\s+', ' ', clean).strip()
-    
     return clean
 
 # --- ניהול משתמשים ומיילים ---
@@ -227,7 +217,7 @@ def get_user_email(phone):
             return None
     return None
 
-# --- פונקציה לעיבוד טקסט למייל (ללא RAG) ---
+# --- פונקציה לעיבוד טקסט למייל ---
 def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
     if not text_to_summarize or not GEMINI_API_KEY:
         return "שגיאה: לא ניתן לנסח תשובה."
@@ -286,13 +276,8 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
             time.sleep(1)
     return "שגיאה בקבלת תשובה מג'מיני."
 
-# --- 🆕 פונקציה חדשה: ניתוח אודיו ישיר על ידי ג'מיני ---
+# --- 🆕 פונקציה משופרת: ניתוח אודיו עם הפקת שני סוגי חיפוש ---
 def analyze_audio_for_rag(audio_path):
-    """
-    שולח את האודיו לג'מיני ומבקש:
-    1. תמלול (מה המשתמש אמר).
-    2. מילת חיפוש מדויקת ל-Pinecone (המוח של ג'מיני מחלץ את זה מהאודיו).
-    """
     if not GEMINI_API_KEY:
         return None
 
@@ -301,17 +286,15 @@ def analyze_audio_for_rag(audio_path):
             audio_data = f.read()
         audio_b64 = base64.b64encode(audio_data).decode("utf-8")
         
+        # 🚀 מבקשים שני דברים שונים: ציטוט מדויק וחיפוש נושא כללי
         prompt = """
-        אתה מומחה לתלמוד ולזיהוי דיבור. האזן להקלטה.
-        1. תמלל את שאלת המשתמש במדויק (בעברית).
-        2. זהה את המושג התלמודי המרכזי.
+        אתה מומחה לתלמוד. האזן לשאלה.
+        עליך להפיק פלט JSON עם שלושה שדות:
+        1. "transcript": תמלול השאלה.
+        2. "exact_quote_search": נסה לזהות את הציטוט המדויק מהגמרא (למשל "סוכה שהיא גבוהה למעלה מעשרים אמה").
+        3. "concept_search": נסח משפט חיפוש כללי שמתאר את הנושא ההלכתי, ללא מילים ספציפיות שעלולות לשבש (למשל "דין גובה הסוכה המקסימלי והפסול").
         
-        החזר תשובה בפורמט JSON בלבד:
-        {
-            "transcript": "התמלול המלא של השאלה",
-            "search_term": "הביטוי הארמי/עברי המדויק לחיפוש"
-        }
-        דוגמה: "סוכה גבוהה למעלה מעשרים אמה"
+        החזר JSON בלבד.
         """
 
         payload = {
@@ -335,117 +318,105 @@ def analyze_audio_for_rag(audio_path):
         result_json = response.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
         parsed_data = json.loads(result_json)
         
-        logging.info(f"🎤 Gemini Audio Analysis: {parsed_data}")
+        logging.info(f"🎤 Gemini Analysis: {parsed_data}")
         return parsed_data
         
     except Exception as e:
-        logging.error(f"❌ Error in Gemini Audio Analysis: {e}")
+        logging.error(f"❌ Error in Audio Analysis: {e}")
         return None
 
-# --- פונקציה משופרת: RAG עם דירוג חכם וגמיש (Smart Fuzzy Re-ranking) ---
-def generate_rag_response(transcript: str, search_term: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
-    """
-    מקבל את התמלול ומילת החיפוש.
-    מבצע חיפוש רחב ב-Pinecone (500 תוצאות) ואז מפעיל אלגוריתם דירוג גמיש.
-    """
+# --- פונקציה משופרת: חיפוש כפול (Dual Search) ואיחוד תוצאות ---
+def generate_rag_response(transcript: str, analysis_data: dict, phone_number: str, instruction_file: str, remember_history: bool) -> str:
     if not transcript or not GEMINI_API_KEY:
         return "שגיאה: חסר טקסט."
 
-    # מנקים ניקוד ממילת החיפוש
-    optimized_query = normalize_text_for_search(search_term if search_term else transcript)
-    logging.info(f"🔍 Normalized Search Query: '{optimized_query}'")
+    exact_term = analysis_data.get("exact_quote_search", "")
+    concept_term = analysis_data.get("concept_search", "")
+    
+    # מנקים ניקוד לחיפוש הדירוג
+    optimized_query_for_rerank = normalize_text_for_search(exact_term if exact_term else transcript)
+    
+    logging.info(f"🔍 Dual Search: Exact='{exact_term}', Concept='{concept_term}'")
 
     if not PINECONE_AVAILABLE or not PINECONE_API_KEY:
         return summarize_with_gemini(transcript, phone_number, instruction_file, remember_history)
 
     try:
-        # שלב א: יצירת וקטור
-        embedding_result = genai.embed_content(
-            model="models/text-embedding-004",
-            content=optimized_query,
-            task_type="retrieval_query"
-        )
-        query_vector = embedding_result['embedding']
-
-        # שלב ב: חיפוש רחב מאוד - הוגדל ל-500 כדי לתפוס גם מקורות חלשים מתמטית
         pc = Pinecone(api_key=PINECONE_API_KEY)
         index = pc.Index(PINECONE_INDEX_NAME)
         
-        search_results = index.query(
-            vector=query_vector,
-            top_k=500, 
-            include_metadata=True
-        )
+        all_matches = {} # מילון למניעת כפילויות לפי ID
 
-        matches = search_results['matches']
-        
-        # הדפסת רשימת ה-ID של התוצאות הראשונות הגולמיות מ-Pinecone (לבדיקה)
-        raw_top_ids = [m['id'] for m in matches[:10]]
-        logging.info(f"🔎 Raw Pinecone Top 10: {raw_top_ids}")
+        # --- חיפוש 1: לפי ציטוט מדויק ---
+        if exact_term:
+            vec_exact = genai.embed_content(model="models/text-embedding-004", content=exact_term, task_type="retrieval_query")['embedding']
+            res_exact = index.query(vector=vec_exact, top_k=150, include_metadata=True) # 150 תוצאות
+            for m in res_exact['matches']:
+                all_matches[m['id']] = m
 
-        search_words = optimized_query.split()
+        # --- חיפוש 2: לפי קונספט (נושא) ---
+        if concept_term:
+            vec_concept = genai.embed_content(model="models/text-embedding-004", content=concept_term, task_type="retrieval_query")['embedding']
+            res_concept = index.query(vector=vec_concept, top_k=150, include_metadata=True) # 150 תוצאות
+            for m in res_concept['matches']:
+                # אם קיים כבר, נשמור את הגבוה מבין השניים (או פשוט נדרוס, זה לא קריטי כי ה-Re-rank קובע)
+                if m['id'] not in all_matches:
+                    all_matches[m['id']] = m
+
+        matches_list = list(all_matches.values())
+        logging.info(f"📚 Total unique candidates found: {len(matches_list)}")
+
+        search_words = optimized_query_for_rerank.split()
         
-        # 🚀 שלב ג: סינון ודירוג מחדש (Re-ranking) גמיש (Proximity Search)
-        for match in matches:
+        # 🚀 שלב הדירוג מחדש (Re-ranking) על הרשימה המאוחדת
+        for match in matches_list:
             original_text = match.get('metadata', {}).get('text', '')
-            clean_text = normalize_text_for_search(original_text) # ניקוי ניקוד, פיסוק ותגיות HTML
+            clean_text = normalize_text_for_search(original_text)
             text_words = clean_text.split()
             
             bonus_score = 0
             
-            # 1. חיפוש גמיש: מילים המופיעות בקרבה (Proximity)
+            # 1. חיפוש גמיש (Proximity)
             proximity_matches = 0
             if len(search_words) > 1:
-                # מיפוי מיקומים
                 word_positions = {}
                 for idx, word in enumerate(text_words):
-                    if word not in word_positions:
-                        word_positions[word] = []
+                    if word not in word_positions: word_positions[word] = []
                     word_positions[word].append(idx)
                 
-                # בדיקת רצף עם דילוגים
                 for i in range(len(search_words) - 1):
                     word1 = search_words[i]
                     word2 = search_words[i+1]
-                    
                     if word1 in word_positions and word2 in word_positions:
                         for pos1 in word_positions[word1]:
                             for pos2 in word_positions[word2]:
-                                dist = pos2 - pos1
-                                if 0 < dist <= 4: # מרחק של 1-4 מילים
+                                if 0 < (pos2 - pos1) <= 4:
                                     proximity_matches += 1
-                                    break 
+                                    break
             
             if proximity_matches > 0:
-                bonus_score += proximity_matches * 2.0 # בונוס מוגדל
-                logging.info(f"🔗 Proximity Match in {match.get('id')}: {proximity_matches} pairs")
+                bonus_score += proximity_matches * 2.5 
+                logging.info(f"🔗 Proximity Match in {match.get('id')}: {proximity_matches}")
 
-            # 2. בונוס על אחוז מילים (Coverage)
-            found_words_count = sum(1 for word in search_words if word in text_words)
-            coverage = found_words_count / len(search_words) if search_words else 0
-            
-            if coverage >= 0.8: 
-                bonus_score += 3.0 
-            elif coverage > 0.5:
-                bonus_score += 1.0
+            # 2. בונוס כיסוי מילים
+            found_cnt = sum(1 for w in search_words if w in text_words)
+            coverage = found_cnt / len(search_words) if search_words else 0
+            if coverage >= 0.8: bonus_score += 3.0
+            elif coverage > 0.5: bonus_score += 1.0
             
             match['_adjusted_score'] = (match.get('score', 0) or 0) + bonus_score
 
-        # מיון מחדש
-        matches.sort(key=lambda x: x['_adjusted_score'], reverse=True)
-        top_matches = matches[:6]
+        # מיון ובחירת הטובים ביותר
+        matches_list.sort(key=lambda x: x['_adjusted_score'], reverse=True)
+        top_matches = matches_list[:6]
 
-        # שלב ד: בניית ההקשר
         retrieved_contexts = []
         for match in top_matches:
             if 'metadata' in match and 'text' in match['metadata']:
                 source_text = match['metadata']['text']
                 source_id = match['id'] if 'id' in match else "מקור"
-                
-                # הדפסת קטע מהטקסט ללוג כדי שנוכל לראות מה המערכת בחרה
-                snippet = normalize_text_for_search(source_text)[:100]
-                logging.info(f"✅ CHOSEN: {source_id} (Score: {match['_adjusted_score']:.2f}) -> Clean Text: {snippet}...")
-                
+                snippet = normalize_text_for_search(source_text)[:80]
+                logging.info(f"✅ CHOSEN: {source_id} (Score: {match['_adjusted_score']:.2f}) -> {snippet}...")
                 retrieved_contexts.append(f"--- מקור ({source_id}) ---\n{source_text}")
 
         context_block = "\n\n".join(retrieved_contexts)
@@ -455,7 +426,7 @@ def generate_rag_response(transcript: str, search_term: str, phone_number: str, 
         logging.error(f"❌ RAG Error: {e}")
         return summarize_with_gemini(transcript, phone_number, instruction_file, remember_history)
 
-    # שלב ה: שליחה לג'מיני לתשובה סופית
+    # שלב התשובה
     instruction_text = load_instructions(instruction_file)
     os.makedirs("/tmp/conversations", exist_ok=True)
     history_path = f"/tmp/conversations/{phone_number}.json"
@@ -471,22 +442,20 @@ def generate_rag_response(transcript: str, search_term: str, phone_number: str, 
 
     history_str = ""
     if history["messages"]:
-        history_str = "היסטוריית שיחה קודמת:\n" + "\n".join(history["messages"][-6:])
+        history_str = "היסטוריית שיחה:\n" + "\n".join(history["messages"][-6:])
 
     final_prompt = f"""
 {instruction_text}
 
-📚 **מקורות מהגמרא (שנבחרו בקפידה):**
+📚 **מקורות מהגמרא:**
 {context_block}
 
 💬 {history_str}
 
-❓ **שאלת המשתמש (תמלול):**
-{transcript}
+❓ **שאלה:** {transcript}
 
 🛑 **הנחיה:**
-1. הסבר את הנושא בצורה ברורה.
-2. בסס את תשובתך על המקורות המצורפים, במיוחד אלו שנראים כדנים ישירות בנושא (למשל במסכת הרלוונטית).
+הסבר את הנושא בבהירות. בסס את תשובתך על המקורות שנמצאו, במיוחד אם הם מהמסכת הרלוונטית לנושא.
 """
 
     payload = {
@@ -515,10 +484,10 @@ def generate_rag_response(transcript: str, search_term: str, phone_number: str, 
                         json.dump(history, f, ensure_ascii=False, indent=2)
                 return result
         except Exception as e:
-            logging.error(f"Gemini RAG API error (attempt {attempt+1}): {e}")
+            logging.error(f"Gemini API error: {e}")
             time.sleep(1)
 
-    return "שגיאה בקבלת תשובה מהמערכת החכמה."
+    return "שגיאה בקבלת תשובה."
 
 
 # --- פונקציה לעיבוד ישיר של אודיו (ללא STT) ---
@@ -718,7 +687,7 @@ def process_audio_request_transcript(request, remember_history: bool, instructio
             
             processed_path = add_silence(temp_input.name).export(tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name, format="wav").name
             
-            # 🚀 שינוי: שליחת האודיו לג'מיני לקבלת תמלול + מילת חיפוש
+            # 🚀 שינוי: שליחת האודיו לג'מיני לקבלת תמלול + נתונים לחיפוש כפול
             analysis_result = analyze_audio_for_rag(processed_path)
             
             if not analysis_result:
@@ -726,10 +695,9 @@ def process_audio_request_transcript(request, remember_history: bool, instructio
                 return Response("id_list_message=t-לא הצלחתי להבין את הנאמר&go_to_folder=/8/6", mimetype="text/plain")
 
             transcript = analysis_result.get("transcript", "")
-            search_term = analysis_result.get("search_term", "")
-
+            
             # 🚀 המשך לחיפוש עם המידע שחולץ מהאודיו
-            rag_response = generate_rag_response(transcript, search_term, phone_number, instruction_file, remember_history)
+            rag_response = generate_rag_response(transcript, analysis_result, phone_number, instruction_file, remember_history)
             
             tts_path = synthesize_with_google_tts(rag_response)
             timestamp = time.strftime("%Y%m%d_%H%M%S")
