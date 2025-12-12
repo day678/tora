@@ -7,7 +7,6 @@ import time
 import requests
 import threading
 import re
-import subprocess 
 import google.generativeai as genai 
 from flask import Flask, request, Response
 from pydub import AudioSegment
@@ -181,12 +180,14 @@ def apply_vowelized_lexicon(text: str) -> str:
         processed_text = re.sub(pattern, vowelized, processed_text)
     return f'<speak lang="he-IL">{processed_text}</speak>'
 
-# --- פונקציית עזר לניקוי ניקוד (קריטי לחיפוש המדויק) ---
-def remove_nikud(text):
-    """מסירה ניקוד עברי מטקסט כדי לאפשר השוואה חלקה."""
-    # טווח היוניקוד של ניקוד עברי הוא 0591 עד 05C7
-    normalized = re.sub(r'[\u0591-\u05C7]', '', text)
-    return normalized
+# --- פונקציית עזר לניקוי ניקוד וסימני פיסוק ---
+def normalize_text_for_search(text):
+    """מסירה ניקוד עברי וסימני פיסוק כדי לאפשר השוואה חלקה."""
+    # הסרת ניקוד (0591-05C7)
+    no_nikud = re.sub(r'[\u0591-\u05C7]', '', text)
+    # הסרת פיסוק (משאירים רק אותיות ומספרים ורווחים)
+    clean = re.sub(r'[^\w\s]', '', no_nikud)
+    return clean
 
 # --- ניהול משתמשים ומיילים ---
 def save_user_email(phone, email):
@@ -274,13 +275,12 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
             time.sleep(1)
     return "שגיאה בקבלת תשובה מג'מיני."
 
-# --- 🆕 פונקציה חדשה: ניתוח אודיו ישיר על ידי ג'מיני (במקום STT) ---
+# --- 🆕 פונקציה חדשה: ניתוח אודיו ישיר על ידי ג'מיני ---
 def analyze_audio_for_rag(audio_path):
     """
     שולח את האודיו לג'מיני ומבקש:
     1. תמלול (מה המשתמש אמר).
     2. מילת חיפוש מדויקת ל-Pinecone (המוח של ג'מיני מחלץ את זה מהאודיו).
-    מחזיר מילון: {'transcript': '...', 'search_term': '...'}
     """
     if not GEMINI_API_KEY:
         return None
@@ -290,20 +290,17 @@ def analyze_audio_for_rag(audio_path):
             audio_data = f.read()
         audio_b64 = base64.b64encode(audio_data).decode("utf-8")
         
-        # פרומפט מיוחד שמבקש פלט JSON
         prompt = """
         אתה מומחה לתלמוד ולזיהוי דיבור. האזן להקלטה.
         1. תמלל את שאלת המשתמש במדויק (בעברית).
-        2. זהה את המושג התלמודי המרכזי שצריך לחפש במאגר הש"ס.
+        2. זהה את המושג התלמודי המרכזי.
         
-        החזר תשובה בפורמט JSON בלבד, ללא טקסט נוסף:
+        החזר תשובה בפורמט JSON בלבד:
         {
             "transcript": "התמלול המלא של השאלה",
-            "search_term": "הביטוי הארמי/עברי המדויק לחיפוש (ללא מילות קישור, ללא כוכביות)"
+            "search_term": "הביטוי הארמי/עברי המדויק לחיפוש"
         }
-        
-        דוגמה: המשתמש שואל "מה הגמרא אומרת על הסברה שהמוציא מחברו עליו הראיה?"
-        פלט: {"transcript": "מה הגמרא אומרת על הסברה שהמוציא מחברו עליו הראיה", "search_term": "המוציא מחברו עליו הראיה"}
+        דוגמה: "סוכה גבוהה למעלה מעשרים אמה"
         """
 
         payload = {
@@ -315,7 +312,7 @@ def analyze_audio_for_rag(audio_path):
             }],
             "generationConfig": {
                 "temperature": 0.1,
-                "response_mime_type": "application/json" # מבקש JSON מפורש
+                "response_mime_type": "application/json"
             }
         }
         
@@ -334,18 +331,18 @@ def analyze_audio_for_rag(audio_path):
         logging.error(f"❌ Error in Gemini Audio Analysis: {e}")
         return None
 
-# --- פונקציה משופרת: RAG שמקבלת כבר את מילת החיפוש המוכנה ---
+# --- פונקציה משופרת: RAG עם דירוג חכם (Smart Re-ranking) ---
 def generate_rag_response(transcript: str, search_term: str, phone_number: str, instruction_file: str, remember_history: bool) -> str:
     """
-    מקבל את התמלול ואת מילת החיפוש (שחולצה כבר מהאודיו).
-    מבצע חיפוש ב-Pinecone, סינון (Re-ranking), ושולח תשובה.
+    מקבל את התמלול ומילת החיפוש.
+    מבצע חיפוש רחב ב-Pinecone ואז מפעיל אלגוריתם דירוג מחדש כדי למצוא את המקור המדויק.
     """
     if not transcript or not GEMINI_API_KEY:
         return "שגיאה: חסר טקסט."
 
-    # שימוש במונח החיפוש שג'מיני הוציא מהאודיו
-    optimized_query = search_term if search_term else transcript
-    logging.info(f"🔍 Using Search Query from Audio: '{optimized_query}'")
+    # מנקים ניקוד ממילת החיפוש
+    optimized_query = normalize_text_for_search(search_term if search_term else transcript)
+    logging.info(f"🔍 Normalized Search Query: '{optimized_query}'")
 
     if not PINECONE_AVAILABLE or not PINECONE_API_KEY:
         return summarize_with_gemini(transcript, phone_number, instruction_file, remember_history)
@@ -365,29 +362,49 @@ def generate_rag_response(transcript: str, search_term: str, phone_number: str, 
         
         search_results = index.query(
             vector=query_vector,
-            top_k=100,
+            top_k=100, 
             include_metadata=True
         )
 
-        # 🚀 שלב ג: סינון ודירוג מחדש (Re-ranking) עם ניקוי ניקוד
+        # 🚀 שלב ג: סינון ודירוג מחדש (Re-ranking) משופר
         matches = search_results['matches']
-        search_terms = optimized_query.split()
+        search_words = optimized_query.split()
         
         for match in matches:
             original_text = match.get('metadata', {}).get('text', '')
-            clean_text = remove_nikud(original_text)
+            clean_text = normalize_text_for_search(original_text) # ניקוי ניקוד ופיסוק
+            
             bonus_score = 0
             
+            # 1. בונוס על התאמה מלאה (ביטוי מדויק)
             if optimized_query in clean_text:
-                bonus_score += 3.0
-                logging.info(f"🎯 Exact match found! Boosting score for {match.get('id')}")
-            else:
-                matches_count = sum(1 for term in search_terms if term in clean_text)
-                if len(search_terms) > 0:
-                    bonus_score += (matches_count / len(search_terms)) * 0.5
+                bonus_score += 5.0 # בונוס מטורף
+                logging.info(f"🎯 Exact Phrase Found in {match.get('id')}! (+5.0)")
+            
+            # 2. בונוס על רצף (Sequence) - זוגות של מילים
+            # זה מונע מצב שבו "סוכה" ו"גבוהה" מופיעות בנפרד (כמו בזבחים) ועדיין מקבלות ניקוד
+            sequence_matches = 0
+            for i in range(len(search_words) - 1):
+                bigram = f"{search_words[i]} {search_words[i+1]}"
+                if bigram in clean_text:
+                    sequence_matches += 1
+            
+            if sequence_matches > 0:
+                bonus_score += sequence_matches * 1.0 # כל זוג נכון נותן נקודה
+                logging.info(f"🔗 Sequence Found in {match.get('id')}: {sequence_matches} pairs")
+
+            # 3. בונוס על אחוז מילים (Keyword Coverage)
+            found_words = sum(1 for word in search_words if word in clean_text)
+            coverage = found_words / len(search_words) if search_words else 0
+            
+            if coverage > 0.8: # אם יותר מ-80% מהמילים נמצאות
+                bonus_score += 2.0
+            elif coverage > 0.5:
+                bonus_score += 0.5
             
             match['_adjusted_score'] = (match.get('score', 0) or 0) + bonus_score
 
+        # מיון מחדש
         matches.sort(key=lambda x: x['_adjusted_score'], reverse=True)
         top_matches = matches[:6]
 
@@ -397,7 +414,11 @@ def generate_rag_response(transcript: str, search_term: str, phone_number: str, 
             if 'metadata' in match and 'text' in match['metadata']:
                 source_text = match['metadata']['text']
                 source_id = match['id'] if 'id' in match else "מקור"
-                logging.info(f"✅ FINAL CHOICE: {source_id} (Score: {match['_adjusted_score']:.4f})")
+                
+                # הדפסת קטע מהטקסט ללוג כדי שנוכל לראות מה המערכת בחרה
+                snippet = source_text[:100].replace('\n', ' ')
+                logging.info(f"✅ CHOSEN: {source_id} (Score: {match['_adjusted_score']:.2f}) -> Text: {snippet}...")
+                
                 retrieved_contexts.append(f"--- מקור ({source_id}) ---\n{source_text}")
 
         context_block = "\n\n".join(retrieved_contexts)
@@ -428,7 +449,7 @@ def generate_rag_response(transcript: str, search_term: str, phone_number: str, 
     final_prompt = f"""
 {instruction_text}
 
-📚 **מקורות מהגמרא (מבוסס על החיפוש: "{optimized_query}"):**
+📚 **מקורות מהגמרא (שנבחרו בקפידה):**
 {context_block}
 
 💬 {history_str}
@@ -438,8 +459,7 @@ def generate_rag_response(transcript: str, search_term: str, phone_number: str, 
 
 🛑 **הנחיה:**
 1. הסבר את הנושא בצורה ברורה.
-2. המקורות המצורפים הם הטובים ביותר שמצאנו. אם הם מכילים את הדין המפורש - צטט והסבר.
-3. אם המקורות הם רק דוגמאות (למשל מיישמים את הכלל במקרה ספציפי), הסבר את הכלל הראשי מידיעתך, והשתמש במקורות כדוגמה.
+2. בסס את תשובתך על המקורות המצורפים, במיוחד אלו שנראים כדנים ישירות בנושא (למשל במסכת הרלוונטית).
 """
 
     payload = {
