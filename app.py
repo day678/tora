@@ -7,9 +7,9 @@ import time
 import requests
 import threading
 import re
-import difflib  # 🆕 ספרייה לזיהוי דמיון בין מחרוזות
+import difflib
 import google.generativeai as genai 
-from flask import Flask, request, Response
+from flask import Flask, request, Response, jsonify
 from pydub import AudioSegment
 import speech_recognition as sr
 from google.cloud import texttospeech 
@@ -318,6 +318,10 @@ def analyze_audio_for_rag(audio_path):
         result_json = response.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
         parsed_data = json.loads(result_json)
         
+        # ✅ תיקון: טיפול במקרה שהפלט הוא רשימה
+        if isinstance(parsed_data, list):
+            parsed_data = parsed_data[0] if parsed_data else {}
+
         logging.info(f"🎤 Gemini Analysis: {parsed_data}")
         return parsed_data
         
@@ -325,7 +329,7 @@ def analyze_audio_for_rag(audio_path):
         logging.error(f"❌ Error in Audio Analysis: {e}")
         return None
 
-# --- פונקציה משופרת: חיפוש כפול (Dual Search) ואיחוד תוצאות ---
+# --- פונקציה משופרת: חיפוש כפול ואיחוד תוצאות ---
 def generate_rag_response(transcript: str, analysis_data: dict, phone_number: str, instruction_file: str, remember_history: bool) -> str:
     if not transcript or not GEMINI_API_KEY:
         return "שגיאה: חסר טקסט."
@@ -338,6 +342,7 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
     
     logging.info(f"🔍 Dual Search: Exact='{exact_term}', Concept='{concept_term}'")
 
+    # --- מנגנון Fallback אם אין Pinecone ---
     if not PINECONE_AVAILABLE or not PINECONE_API_KEY:
         return summarize_with_gemini(transcript, phone_number, instruction_file, remember_history)
 
@@ -347,15 +352,14 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
         
         all_matches = {}
 
-        # --- חיפוש 1: לפי ציטוט מדויק (מורחב ל-1000) ---
+        # --- חיפוש 1: לפי ציטוט מדויק ---
         if exact_term:
             vec_exact = genai.embed_content(model="models/text-embedding-004", content=exact_term, task_type="retrieval_query")['embedding']
-            # הרחבה ל-1000 כדי לתפוס מסמכים גדולים שהרלוונטיות שלהם מדוללת
             res_exact = index.query(vector=vec_exact, top_k=1000, include_metadata=True) 
             for m in res_exact['matches']:
                 all_matches[m['id']] = m
 
-        # --- חיפוש 2: לפי קונספט (מורחב ל-1000) ---
+        # --- חיפוש 2: לפי קונספט ---
         if concept_term:
             vec_concept = genai.embed_content(model="models/text-embedding-004", content=concept_term, task_type="retrieval_query")['embedding']
             res_concept = index.query(vector=vec_concept, top_k=1000, include_metadata=True) 
@@ -375,39 +379,33 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
             
             bonus_score = 0
             
-            # בדיקת דמיון רצף חכם (SequenceMatcher)
-            # בודק אם הביטוי מופיע בטקסט (אפילו עם שינויים קלים)
             if exact_term:
                 clean_search = normalize_text_for_search(exact_term)
-                # אם הביטוי קצר יחסית (פחות מ-100 תווים), נבדוק אם הוא נמצא
                 if len(clean_search) > 5 and clean_search in clean_text:
-                     bonus_score += 10.0 # בונוס מוחלט! מצאנו את הציטוט
+                     bonus_score += 10.0
                      logging.info(f"🏆 EXACT PHRASE MATCH in {match.get('id')}! (+10.0)")
                 else:
-                    # בדיקה "מרוככת" - האם רוב המילים נמצאות קרוב אחת לשנייה?
                     text_words = clean_text.split()
                     search_words_list = clean_search.split()
-                    
-                    found_words_count = 0
-                    for sw in search_words_list:
-                        if sw in text_words:
-                            found_words_count += 1
-                    
+                    found_words_count = sum(1 for sw in search_words_list if sw in text_words)
                     coverage = found_words_count / len(search_words_list) if search_words_list else 0
                     
-                    if coverage > 0.9: # 90% מהמילים נמצאות
-                        bonus_score += 5.0
-                    elif coverage > 0.7:
-                        bonus_score += 2.0
+                    if coverage > 0.9: bonus_score += 5.0
+                    elif coverage > 0.7: bonus_score += 2.0
             
             match['_adjusted_score'] = (match.get('score', 0) or 0) + bonus_score
 
-        # מיון ובחירת הטובים ביותר
         matches_list.sort(key=lambda x: x['_adjusted_score'], reverse=True)
         top_matches = matches_list[:6]
 
         retrieved_contexts = []
+        is_relevant_found = False
+        
         for match in top_matches:
+            # אם הציון גבוה (מעל 1.0 אומר שמצאנו משהו עם בונוס משמעותי), נסמן כרלוונטי
+            if match['_adjusted_score'] > 1.2:
+                is_relevant_found = True
+                
             if 'metadata' in match and 'text' in match['metadata']:
                 source_text = match['metadata']['text']
                 source_id = match['id'] if 'id' in match else "מקור"
@@ -416,7 +414,14 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
                 retrieved_contexts.append(f"--- מקור ({source_id}) ---\n{source_text}")
 
         context_block = "\n\n".join(retrieved_contexts)
-        if not context_block: context_block = "לא נמצאו מקורות ישירים במאגר."
+        
+        # 🚀 הוראה מיוחדת לג'מיני אם לא נמצאו מקורות איכותיים
+        extra_instruction = ""
+        if not is_relevant_found or not context_block:
+             logging.warning("⚠️ No highly relevant sources found. Instructing Gemini to use internal knowledge.")
+             extra_instruction = "שים לב: המקורות שנמצאו במאגר אינם תואמים במדויק לשאלה (ייתכן שהם עוסקים בנושא דומה אך לא בסוגיה הספציפית). אנא ענה על השאלה בהסתמך על הידע התלמודי הרחב שלך, והשתמש במקורות רק אם הם באמת רלוונטיים כדוגמה."
+             if not context_block:
+                 context_block = "לא נמצאו מקורות ישירים במאגר."
 
     except Exception as e:
         logging.error(f"❌ RAG Error: {e}")
@@ -451,6 +456,7 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
 ❓ **שאלה:** {transcript}
 
 🛑 **הנחיה:**
+{extra_instruction}
 הסבר את הנושא בבהירות. בסס את תשובתך על המקורות שנמצאו, במיוחד אם הם מהמסכת הרלוונטית לנושא.
 """
 
@@ -623,6 +629,36 @@ load_vowelized_lexicon()
 # ------------------ Routes ------------------
 @app.route("/health", methods=["GET"])
 def health(): return Response("OK", status=200, mimetype="text/plain")
+
+# --- 🆕 נתיב לבדיקת תכולת המסד ---
+@app.route("/check_db", methods=["GET"])
+def check_db():
+    if not PINECONE_AVAILABLE or not PINECONE_API_KEY:
+        return jsonify({"error": "Pinecone not configured"})
+    try:
+        pc = Pinecone(api_key=PINECONE_API_KEY)
+        index = pc.Index(PINECONE_INDEX_NAME)
+        stats = index.describe_index_stats()
+        
+        # ננסה לשלוף קצת מידע כדי לראות שמות
+        dummy_vec = [0.0] * 768
+        res = index.query(vector=dummy_vec, top_k=500, include_metadata=False)
+        ids = [m['id'] for m in res['matches']]
+        
+        # חילוץ שמות מסכתות מה-IDs
+        masechtot = set()
+        for i in ids:
+            parts = i.split('_')
+            if len(parts) > 0: masechtot.add(parts[0])
+            
+        return jsonify({
+            "total_vector_count": stats.get('total_vector_count'),
+            "namespaces": stats.get('namespaces'),
+            "sample_ids_count": len(ids),
+            "detected_masechtot": list(masechtot)
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 @app.route("/update_email", methods=["GET"])
 def update_email():
