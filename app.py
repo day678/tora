@@ -8,6 +8,7 @@ import requests
 import threading
 import re
 import difflib
+import traceback  # 🆕 הוספתי בשביל דיבוג מעמיק
 import google.generativeai as genai 
 from flask import Flask, request, Response, jsonify
 from pydub import AudioSegment
@@ -402,7 +403,6 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
         is_relevant_found = False
         
         for match in top_matches:
-            # אם הציון גבוה (מעל 1.0 אומר שמצאנו משהו עם בונוס משמעותי), נסמן כרלוונטי
             if match['_adjusted_score'] > 1.2:
                 is_relevant_found = True
                 
@@ -415,7 +415,7 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
 
         context_block = "\n\n".join(retrieved_contexts)
         
-        # 🚀 הוראה מיוחדת לג'מיני אם לא נמצאו מקורות איכותיים
+        # הוראה מיוחדת לג'מיני אם לא נמצאו מקורות איכותיים
         extra_instruction = ""
         if not is_relevant_found or not context_block:
              logging.warning("⚠️ No highly relevant sources found. Instructing Gemini to use internal knowledge.")
@@ -630,6 +630,11 @@ load_vowelized_lexicon()
 @app.route("/health", methods=["GET"])
 def health(): return Response("OK", status=200, mimetype="text/plain")
 
+# --- 🆕 דף בית פשוט ---
+@app.route("/", methods=["GET"])
+def index():
+    return "Server is running! Go to /check_db to check database."
+
 # --- 🆕 נתיב לבדיקת תכולת המסד ---
 @app.route("/check_db", methods=["GET"])
 def check_db():
@@ -641,7 +646,7 @@ def check_db():
         stats = index.describe_index_stats()
         
         # ננסה לשלוף קצת מידע כדי לראות שמות
-        dummy_vec = [0.0] * 768
+        dummy_vec = [0.1] * 768
         res = index.query(vector=dummy_vec, top_k=500, include_metadata=False)
         ids = [m['id'] for m in res['matches']]
         
@@ -651,14 +656,19 @@ def check_db():
             parts = i.split('_')
             if len(parts) > 0: masechtot.add(parts[0])
             
+        # תיקון תאימות לגרסאות שונות של Pinecone
+        total_vectors = stats.total_vector_count if hasattr(stats, 'total_vector_count') else stats.get('total_vector_count')
+
         return jsonify({
-            "total_vector_count": stats.get('total_vector_count'),
-            "namespaces": stats.get('namespaces'),
+            "total_vectors": total_vectors,
+            "namespaces": str(stats.namespaces) if hasattr(stats, 'namespaces') else stats.get('namespaces'),
             "sample_ids_count": len(ids),
             "detected_masechtot": list(masechtot)
         })
     except Exception as e:
-        return jsonify({"error": str(e)})
+        logging.error(f"DB Check Error: {e}")
+        logging.error(traceback.format_exc())
+        return jsonify({"error": str(e), "trace": traceback.format_exc()})
 
 @app.route("/update_email", methods=["GET"])
 def update_email():
