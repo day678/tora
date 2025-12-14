@@ -82,7 +82,7 @@ MASECHET_MAPPING = {
 # --- ✅ יצירה אוטומטית של קבצי הוראות חסרים ---
 def ensure_instruction_files_exist():
     # פונקציה זו יוצרת קבצי הגדרות אם הם חסרים, כדי למנוע שגיאות
-    pass # (הקוד כבר קיים אצלך, קיצרתי כאן לתצוגה)
+    pass 
 
 ensure_instruction_files_exist()
 
@@ -231,16 +231,17 @@ def analyze_audio_for_rag(audio_path):
         with open(audio_path, "rb") as f: audio_data = f.read()
         audio_b64 = base64.b64encode(audio_data).decode("utf-8")
         
-        # 🚀 הפרומפט החדש: מבין בקשות "ציטוט" ומחלץ דף מדויק
+        # 🚀 הפרומפט המעודכן: מבקש גם מילות מפתח (ארמית) וגם נושא (עברית מודרנית)
         prompt = """
-        אתה מומחה לתלמוד. האזן להקלטה.
-        עליך להבין אם המשתמש שואל שאלה רעיונית (Content) או מבקש למצוא מיקום ספציפי (Navigation/Quote).
+        אתה מומחה לתלמוד. האזן לשאלה.
+        עליך להבין את כוונת המשתמש ולהפיק נתונים לחיפוש חכם במאגר.
         
         החזר JSON בלבד עם השדות:
         1. "transcript": תמלול השאלה בעברית.
-        2. "exact_quote_search": ציטוט מדויק לחיפוש (למשל "סוכה שהיא גבוהה למעלה מעשרים אמה").
-        3. "masechet": שם המסכת בעברית אם הוזכרה (למשל "שבת").
-        4. "specific_daf": אם הוזכר דף ספציפי, המר אותו לפורמט סטנדרטי באנגלית (למשל: דף ב עמוד א -> "Daf 2a", דף כ' עמוד ב' -> "Daf 20b"). אם לא הוזכר, השאר ריק.
+        2. "talmudic_search_query": מילות מפתח ארמיות/תלמודיות מתוך השאלה (למשל: "סוכה שהיא גבוהה עשרים אמה"). זה נועד למצוא את הטקסט המקורי.
+        3. "modern_topic_search": תיאור הנושא בעברית מודרנית ברורה (למשל: "דין גובה הסוכה המקסימלי"). זה נועד למצוא את הסיכום שקיים במאגר.
+        4. "masechet": שם המסכת בעברית אם הוזכרה (למשל "שבת").
+        5. "specific_daf": אם הוזכר דף ספציפי, המר אותו לפורמט סטנדרטי באנגלית (למשל: "Daf 2a"). אם לא הוזכר, השאר ריק.
         """
         
         API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
@@ -262,9 +263,11 @@ def analyze_audio_for_rag(audio_path):
 def generate_rag_response(transcript: str, analysis_data: dict, phone_number: str, instruction_file: str, remember_history: bool) -> str:
     if not transcript: return "לא שמעתי."
     
-    exact_term = analysis_data.get("exact_quote_search", "")
+    # שליפת הנתונים מהניתוח החכם
+    talmudic_query = analysis_data.get("talmudic_search_query", "")
+    topic_query = analysis_data.get("modern_topic_search", "")
     masechet_hebrew = analysis_data.get("masechet", "")
-    specific_daf = analysis_data.get("specific_daf", "") # לדוגמה "Daf 2a"
+    specific_daf = analysis_data.get("specific_daf", "") 
     
     # בניית הפילטר ל-Pinecone
     filter_dict = {}
@@ -275,7 +278,6 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
         english_name = MASECHET_MAPPING.get(clean_mas)
         
         if not english_name:
-            # חיפוש "רך" אם השם לא מדויק
             for key, val in MASECHET_MAPPING.items():
                 if key in clean_mas:
                     english_name = val
@@ -285,12 +287,19 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
             filter_dict["source"] = {"$eq": english_name}
             logging.info(f"🎯 Masechet Filter: {english_name}")
 
-    # 2. סינון לפי דף (השדרוג החדש!)
+    # 2. סינון לפי דף
     if specific_daf:
         filter_dict["daf"] = {"$eq": specific_daf}
         logging.info(f"🎯 Daf Filter: {specific_daf}")
 
-    optimized_query = normalize_text_for_search(exact_term if exact_term else transcript)
+    # יצירת שאילתת חיפוש משולבת (גם ארמית וגם נושא)
+    # זה הלב של השינוי! הווקטור שייווצר יכיל גם את המושגים הארמיים וגם את הנושא בעברית
+    combined_search_query = f"{topic_query} {talmudic_query}".strip()
+    if not combined_search_query:
+        combined_search_query = transcript
+
+    optimized_query_for_rerank = normalize_text_for_search(talmudic_query if talmudic_query else transcript)
+    logging.info(f"🔍 Combined Search Query: '{combined_search_query}'")
 
     if not PINECONE_AVAILABLE or not PINECONE_API_KEY:
         return summarize_with_gemini(transcript, phone_number, instruction_file, remember_history)
@@ -299,43 +308,37 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
         pc = Pinecone(api_key=PINECONE_API_KEY)
         index = pc.Index(PINECONE_INDEX_NAME)
         
-        # אם יש לנו פילטר ספציפי (מסכת+דף), החיפוש הוא טריוויאלי - לא צריך וקטור מתוחכם
-        # נשתמש בווקטור של השאלה רק כדי למיין את התוצאות בתוך הדף (אם הוא מחולק)
-        search_text = exact_term if exact_term else transcript
-        vec = genai.embed_content(model="models/text-embedding-004", content=search_text, task_type="retrieval_query")['embedding']
+        # בניית וקטור לחיפוש (משתמשים בשאילתה המשולבת)
+        vec = genai.embed_content(model="models/text-embedding-004", content=combined_search_query, task_type="retrieval_query")['embedding']
         
-        # אם יש פילטר, מספיק לבקש מעט תוצאות כי הן יהיו בול פגיעה
-        k = 10 if (filter_dict.get('daf')) else (100 if filter_dict else 500)
+        # חיפוש
+        k = 15 if (filter_dict.get('daf')) else (200 if filter_dict else 500)
         
         res = index.query(vector=vec, top_k=k, include_metadata=True, filter=filter_dict if filter_dict else None)
         
         matches = res['matches']
-        logging.info(f"📚 Found {len(matches)} candidates (Filter: {filter_dict})")
+        logging.info(f"📚 Found {len(matches)} candidates")
 
         # Re-ranking (משופר)
-        search_words = optimized_query.split()
+        search_words = optimized_query_for_rerank.split()
         for match in matches:
             orig_text = match.get('metadata', {}).get('text', '')
             clean_text = normalize_text_for_search(orig_text)
             bonus = 0
             
-            # אם חיפשנו דף ספציפי, כל התוכן שלו רלוונטי ב-100%, ניתן ציון גבוה
-            if specific_daf:
-                bonus += 50.0 
+            if specific_daf: bonus += 50.0 
+            if optimized_query_for_rerank in clean_text: bonus += 10.0
             
-            # בדיקת ביטוי מדויק
-            if optimized_query in clean_text: bonus += 10.0
-            
-            # בדיקת מילים
             found = sum(1 for w in search_words if w in clean_text.split())
             if len(search_words) > 0:
                 coverage = found / len(search_words)
                 if coverage > 0.8: bonus += 5.0
+                elif coverage > 0.5: bonus += 2.0
             
             match['_score'] = (match.get('score', 0) or 0) + bonus
 
         matches.sort(key=lambda x: x['_score'], reverse=True)
-        top_matches = matches[:3] # אם זה דף ספציפי, מספיק 1-2 תוצאות
+        top_matches = matches[:4]
 
         contexts = []
         for m in top_matches:
@@ -345,11 +348,9 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
             
         context_block = "\n\n".join(contexts)
         
-        # אם ביקשו דף ספציפי ולא מצאנו (למשל סוכה דף ב שאין במאגר) - נודיע לג'מיני
         extra_instruction = ""
         if specific_daf and not context_block:
-            logging.warning(f"⚠️ User asked for {masechet_hebrew} {specific_daf} but nothing found in DB.")
-            extra_instruction = f"המשתמש ביקש במפורש את {masechet_hebrew} {specific_daf}, אך הדף הזה לא נמצא במאגר המידע שלך כרגע. אנא ציין זאת בתשובתך ונסה לענות מהידע הכללי אם אפשר."
+            extra_instruction = f"הדף המבוקש {specific_daf} לא נמצא במאגר. ענה מהידע הכללי."
             context_block = "הדף המבוקש לא נמצא באינדקס."
 
     except Exception as e:
@@ -376,7 +377,8 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
     
     שאלה/בקשה: {transcript}
     
-    אם התבקשת לצטט דף ספציפי והוא מופיע במקורות - צטט ממנו את החלק הרלוונטי והסבר.
+    אם זו שאלה הלכתית/רעיונית: הסבר את הנושא בבהירות על בסיס המקורות.
+    אם זו בקשת ציטוט: צטט והסבר.
     """
     
     API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent"
