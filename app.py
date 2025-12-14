@@ -224,24 +224,23 @@ def summarize_with_gemini(text_to_summarize: str, phone_number: str, instruction
     except Exception: pass
     return "שגיאה."
 
-# --- 🚀 פונקציה לניתוח אודיו וזיהוי מסכת/דף (Intent Recognition) ---
+# --- 🚀 פונקציה לניתוח אודיו ---
 def analyze_audio_for_rag(audio_path):
     if not GEMINI_API_KEY: return None
     try:
         with open(audio_path, "rb") as f: audio_data = f.read()
         audio_b64 = base64.b64encode(audio_data).decode("utf-8")
         
-        # 🚀 הפרומפט החדש והמשופר: כולל תרגום לשפת הגמרא
         prompt = """
         אתה מומחה לתלמוד. האזן לשאלה.
-        עליך להבין אם המשתמש שואל שאלה רעיונית (Content) או מבקש למצוא מיקום ספציפי (Navigation/Quote).
+        עליך להבין את כוונת המשתמש ולהפיק נתונים לחיפוש חכם במאגר.
         
         החזר JSON בלבד עם השדות:
         1. "transcript": תמלול השאלה בעברית.
-        2. "talmudic_search_query": מילות מפתח ארמיות/תלמודיות מתוך השאלה (למשל: "סוכה שהיא גבוהה עשרים אמה"). זה נועד למצוא את הטקסט המקורי.
-        3. "modern_topic_search": תיאור הנושא בעברית מודרנית ברורה (למשל: "דין גובה הסוכה המקסימלי"). זה נועד למצוא את הסיכום שקיים במאגר.
-        4. "masechet": שם המסכת בעברית אם הוזכרה (למשל "שבת").
-        5. "specific_daf": אם הוזכר דף ספציפי, המר אותו לפורמט סטנדרטי באנגלית (למשל: "Daf 2a"). אם לא הוזכר, השאר ריק.
+        2. "talmudic_search_query": מילות מפתח ארמיות/תלמודיות מתוך השאלה (למשל: "סוכה שהיא גבוהה עשרים אמה").
+        3. "modern_topic_search": תיאור הנושא בעברית מודרנית ברורה (למשל: "דין גובה הסוכה המקסימלי").
+        4. "masechet": שם המסכת בעברית אם הוזכרה.
+        5. "specific_daf": אם הוזכר דף ספציפי, המר לאנגלית (למשל: "Daf 2a").
         """
         
         API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
@@ -252,6 +251,7 @@ def analyze_audio_for_rag(audio_path):
         
         if resp.status_code == 200:
             res_json = json.loads(resp.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "{}"))
+            # טיפול אם ג'מיני מחזיר רשימה
             if isinstance(res_json, list): res_json = res_json[0]
             logging.info(f"🎤 Analysis: {res_json}")
             return res_json
@@ -259,11 +259,10 @@ def analyze_audio_for_rag(audio_path):
         logging.error(f"Error analysis: {e}")
     return None
 
-# --- 🚀 RAG חכם עם סינון מדויק (Metadata Filtering) ---
+# --- 🚀 RAG חכם עם סינון מדויק ודירוג גמיש (Fuzzy) ---
 def generate_rag_response(transcript: str, analysis_data: dict, phone_number: str, instruction_file: str, remember_history: bool) -> str:
     if not transcript: return "לא שמעתי."
     
-    # שליפת הנתונים מהניתוח החכם
     talmudic_query = analysis_data.get("talmudic_search_query", "")
     topic_query = analysis_data.get("modern_topic_search", "")
     masechet_hebrew = analysis_data.get("masechet", "")
@@ -276,13 +275,11 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
     if masechet_hebrew:
         clean_mas = masechet_hebrew.replace("מסכת", "").strip()
         english_name = MASECHET_MAPPING.get(clean_mas)
-        
         if not english_name:
             for key, val in MASECHET_MAPPING.items():
                 if key in clean_mas:
                     english_name = val
                     break
-        
         if english_name:
             filter_dict["source"] = {"$eq": english_name}
             logging.info(f"🎯 Masechet Filter: {english_name}")
@@ -292,14 +289,12 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
         filter_dict["daf"] = {"$eq": specific_daf}
         logging.info(f"🎯 Daf Filter: {specific_daf}")
 
-    # יצירת שאילתת חיפוש משולבת (גם ארמית וגם נושא)
-    # זה הלב של השינוי! הווקטור שייווצר יכיל גם את המושגים הארמיים וגם את הנושא בעברית
+    # יצירת שאילתת חיפוש משולבת ל-Vector Search
     combined_search_query = f"{topic_query} {talmudic_query}".strip()
     if not combined_search_query:
         combined_search_query = transcript
 
-    # לדירוג מחדש (Re-ranking) אנחנו נשתמש במונחים התלמודיים הנקיים!
-    # זה התיקון הקריטי: אנחנו מחפשים בטקסט הגמרא את המילים של הגמרא, לא את ההסבר המודרני
+    # מילות חיפוש לדירוג מחדש (ללא ניקוד)
     optimized_query_for_rerank = normalize_text_for_search(talmudic_query if talmudic_query else transcript)
     logging.info(f"🔍 Combined Vector Search: '{combined_search_query}'")
     logging.info(f"🔍 Rerank Keywords: '{optimized_query_for_rerank}'")
@@ -311,45 +306,54 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
         pc = Pinecone(api_key=PINECONE_API_KEY)
         index = pc.Index(PINECONE_INDEX_NAME)
         
-        # בניית וקטור לחיפוש (משתמשים בשאילתה המשולבת)
+        # בניית וקטור לחיפוש
         vec = genai.embed_content(model="models/text-embedding-004", content=combined_search_query, task_type="retrieval_query")['embedding']
         
-        # חיפוש
-        k = 15 if (filter_dict.get('daf')) else (200 if filter_dict else 500)
+        # חיפוש רחב מאוד (1000) כדי לתפוס גם כשהוקטור לא מדויק
+        k = 15 if (filter_dict.get('daf')) else (200 if filter_dict else 1000)
         
         res = index.query(vector=vec, top_k=k, include_metadata=True, filter=filter_dict if filter_dict else None)
         
         matches = res['matches']
         logging.info(f"📚 Found {len(matches)} candidates")
 
-        # Re-ranking (משופר)
+        # 🚀 Re-ranking חכם שמתמודד עם תחיליות וקידומות
         search_words = optimized_query_for_rerank.split()
+        
         for match in matches:
             orig_text = match.get('metadata', {}).get('text', '')
             clean_text = normalize_text_for_search(orig_text)
             bonus = 0
             
             if specific_daf: bonus += 50.0 
-            if optimized_query_for_rerank in clean_text: bonus += 10.0
             
-            # בדיקת מילים תלמודיות בתוך הטקסט
-            found = sum(1 for w in search_words if w in clean_text.split())
+            # ספירת מילות מפתח שנמצאות בטקסט (Substring Match)
+            # זה השינוי הגדול: בודקים אם "ים" נמצא בתוך "והים", או "הים"
+            found_count = 0
+            for w in search_words:
+                if len(w) < 2: continue # מדלגים על אותיות בודדות
+                if w in clean_text: # בדיקה גמישה!
+                    found_count += 1
+                    bonus += 1.5 # ניקוד על כל מילה שנמצאה
+            
+            # בונוס נוסף אם רוב המילים נמצאות
             if len(search_words) > 0:
-                coverage = found / len(search_words)
-                if coverage > 0.8: bonus += 5.0
-                elif coverage > 0.5: bonus += 2.0
+                coverage = found_count / len(search_words)
+                if coverage > 0.7: bonus += 5.0
             
             match['_score'] = (match.get('score', 0) or 0) + bonus
 
+        # מיון לפי הציון החדש
         matches.sort(key=lambda x: x['_score'], reverse=True)
-        top_matches = matches[:4]
+        top_matches = matches[:5]
 
         contexts = []
         for m in top_matches:
             txt = m['metadata']['text']
             src = m['id']
-            # ✅ החזרתי את הלוג החשוב!
-            logging.info(f"✅ CHOSEN: {src} (Score: {m['_score']:.2f})")
+            # מציג בלוג איזה מילים נמצאו כדי שתראה שהתיקון עובד
+            found_terms = [w for w in search_words if w in normalize_text_for_search(txt)]
+            logging.info(f"✅ CHOSEN: {src} (Score: {m['_score']:.2f}) Matches: {found_terms}")
             contexts.append(f"--- מקור: {src} ---\n{txt}")
             
         context_block = "\n\n".join(contexts)
@@ -361,6 +365,7 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
 
     except Exception as e:
         logging.error(f"RAG Error: {e}")
+        logging.error(traceback.format_exc())
         return summarize_with_gemini(transcript, phone_number, instruction_file, remember_history)
 
     # שליחה לג'מיני לתשובה
@@ -402,7 +407,6 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
 
 # --- שאר הפונקציות ללא שינוי ---
 def run_gemini_audio_direct(audio_path, phone, instr_file, hist):
-    # (קוד מקוצר)
     return "שירות זמני לא זמין." 
 
 def synthesize_with_google_tts(text):
@@ -424,7 +428,6 @@ def upload_to_yemot(path, full_path):
         return resp.json().get("responseStatus") == "OK"
 
 def update_playfile_ini(phone):
-    # (אותו קוד)
     try:
         url = "https://www.call2all.co.il/ym/api/UploadFile"
         resp = requests.get("https://www.call2all.co.il/ym/api/GetFiles", params={"token": SYSTEM_TOKEN, "path": f"{BASE_YEMOT_FOLDER}/{phone}"})
@@ -479,7 +482,7 @@ def process_transcript_route(history, instr):
             tmp.write(resp.content)
             tmp.flush()
             
-            # 1. ניתוח אודיו וזיהוי כוונה (מסכת/דף)
+            # 1. ניתוח אודיו
             analysis = analyze_audio_for_rag(tmp.name)
             if not analysis: return Response("id_list_message=t-תקלה&go_to_folder=/8/6", mimetype="text/plain")
             
