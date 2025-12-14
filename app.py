@@ -231,10 +231,10 @@ def analyze_audio_for_rag(audio_path):
         with open(audio_path, "rb") as f: audio_data = f.read()
         audio_b64 = base64.b64encode(audio_data).decode("utf-8")
         
-        # 🚀 הפרומפט המעודכן: מבקש גם מילות מפתח (ארמית) וגם נושא (עברית מודרנית)
+        # 🚀 הפרומפט החדש והמשופר: כולל תרגום לשפת הגמרא
         prompt = """
         אתה מומחה לתלמוד. האזן לשאלה.
-        עליך להבין את כוונת המשתמש ולהפיק נתונים לחיפוש חכם במאגר.
+        עליך להבין אם המשתמש שואל שאלה רעיונית (Content) או מבקש למצוא מיקום ספציפי (Navigation/Quote).
         
         החזר JSON בלבד עם השדות:
         1. "transcript": תמלול השאלה בעברית.
@@ -298,8 +298,11 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
     if not combined_search_query:
         combined_search_query = transcript
 
+    # לדירוג מחדש (Re-ranking) אנחנו נשתמש במונחים התלמודיים הנקיים!
+    # זה התיקון הקריטי: אנחנו מחפשים בטקסט הגמרא את המילים של הגמרא, לא את ההסבר המודרני
     optimized_query_for_rerank = normalize_text_for_search(talmudic_query if talmudic_query else transcript)
-    logging.info(f"🔍 Combined Search Query: '{combined_search_query}'")
+    logging.info(f"🔍 Combined Vector Search: '{combined_search_query}'")
+    logging.info(f"🔍 Rerank Keywords: '{optimized_query_for_rerank}'")
 
     if not PINECONE_AVAILABLE or not PINECONE_API_KEY:
         return summarize_with_gemini(transcript, phone_number, instruction_file, remember_history)
@@ -329,6 +332,7 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
             if specific_daf: bonus += 50.0 
             if optimized_query_for_rerank in clean_text: bonus += 10.0
             
+            # בדיקת מילים תלמודיות בתוך הטקסט
             found = sum(1 for w in search_words if w in clean_text.split())
             if len(search_words) > 0:
                 coverage = found / len(search_words)
@@ -344,6 +348,8 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
         for m in top_matches:
             txt = m['metadata']['text']
             src = m['id']
+            # ✅ החזרתי את הלוג החשוב!
+            logging.info(f"✅ CHOSEN: {src} (Score: {m['_score']:.2f})")
             contexts.append(f"--- מקור: {src} ---\n{txt}")
             
         context_block = "\n\n".join(contexts)
