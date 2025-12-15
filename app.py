@@ -289,7 +289,7 @@ def analyze_text_for_rag(text_input):
     # במקרה של שגיאה נחזיר אובייקט ריק כדי שהתהליך ימשיך
     return {"talmudic_search_query": text_input, "modern_topic_search": text_input}
 
-# --- 🚀 RAG חכם עם סינון מדויק ודירוג גמיש (Fuzzy) ---
+# --- 🚀 RAG חכם עם סינון מדויק ודירוג גמיש (Fuzzy) - גרסה משופרת ---
 def generate_rag_response(transcript: str, analysis_data: dict, phone_number: str, instruction_file: str, remember_history: bool) -> str:
     if not transcript: return "לא שמעתי."
     
@@ -305,6 +305,7 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
     if masechet_hebrew:
         clean_mas = masechet_hebrew.replace("מסכת", "").strip()
         english_name = MASECHET_MAPPING.get(clean_mas)
+        # ניסיון חיפוש חכם יותר במילון
         if not english_name:
             for key, val in MASECHET_MAPPING.items():
                 if key in clean_mas:
@@ -320,14 +321,14 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
         logging.info(f"🎯 Daf Filter: {specific_daf}")
 
     # יצירת שאילתת חיפוש משולבת ל-Vector Search
-    combined_search_query = f"{topic_query} {talmudic_query}".strip()
+    # שינוי: נותנים משקל כפול לנושא המודרני כדי לחזק את ההקשר
+    combined_search_query = f"{topic_query} {topic_query} {talmudic_query}".strip()
     if not combined_search_query:
         combined_search_query = transcript
 
     # מילות חיפוש לדירוג מחדש (ללא ניקוד)
     optimized_query_for_rerank = normalize_text_for_search(talmudic_query if talmudic_query else transcript)
     logging.info(f"🔍 Combined Vector Search: '{combined_search_query}'")
-    logging.info(f"🔍 Rerank Keywords: '{optimized_query_for_rerank}'")
 
     if not PINECONE_AVAILABLE or not PINECONE_API_KEY:
         return summarize_with_gemini(transcript, phone_number, instruction_file, remember_history)
@@ -336,54 +337,59 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
         pc = Pinecone(api_key=PINECONE_API_KEY)
         index = pc.Index(PINECONE_INDEX_NAME)
         
-        # בניית וקטור לחיפוש
         vec = genai.embed_content(model="models/text-embedding-004", content=combined_search_query, task_type="retrieval_query")['embedding']
         
-        # חיפוש רחב מאוד (1000) כדי לתפוס גם כשהוקטור לא מדויק
-        k = 15 if (filter_dict.get('daf')) else (200 if filter_dict else 1000)
+        # שינוי קריטי: הגדלת כמות התוצאות גם כשיש פילטר מסכת, כדי לא לפספס דפים רחוקים
+        k = 15 if (filter_dict.get('daf')) else 1000
         
         res = index.query(vector=vec, top_k=k, include_metadata=True, filter=filter_dict if filter_dict else None)
         
         matches = res['matches']
         logging.info(f"📚 Found {len(matches)} candidates")
 
-        # 🚀 Re-ranking חכם שמתמודד עם תחיליות וקידומות
+        # 🚀 Re-ranking משופר ומאוזן
         search_words = optimized_query_for_rerank.split()
         
         for match in matches:
             orig_text = match.get('metadata', {}).get('text', '')
             clean_text = normalize_text_for_search(orig_text)
+            
+            # הניקוד המקורי של ג'מיני (בדרך כלל בין 0.7 ל 0.9)
+            base_score = match.get('score', 0) or 0
             bonus = 0
             
-            if specific_daf: bonus += 50.0 
+            if specific_daf: bonus += 10.0 # בונוס עצום אם המשתמש ביקש דף ספציפי
             
-            # ספירת מילות מפתח שנמצאות בטקסט (Substring Match)
-            # זה השינוי הגדול: בודקים אם "ים" נמצא בתוך "והים", או "הים"
+            # ספירת מילות מפתח
             found_count = 0
             for w in search_words:
-                if len(w) < 2: continue # מדלגים על אותיות בודדות
-                if w in clean_text: # בדיקה גמישה!
+                if len(w) < 2: continue 
+                if w in clean_text: 
                     found_count += 1
-                    bonus += 1.5 # ניקוד על כל מילה שנמצאה
+                    # שינוי קריטי: הקטנת הבונוס כדי לא לדרוס את המשמעות הסמנטית
+                    bonus += 0.15 
             
-            # בונוס נוסף אם רוב המילים נמצאות
+            # בונוס על כיסוי מלא (אם כל המילים נמצאו)
             if len(search_words) > 0:
                 coverage = found_count / len(search_words)
-                if coverage > 0.7: bonus += 5.0
+                # נותנים בונוס משמעותי רק אם מצאנו את רוב המילים (למשל 'ים' וגם 'כרמלית')
+                if coverage > 0.8: bonus += 0.5
             
-            match['_score'] = (match.get('score', 0) or 0) + bonus
+            match['_score'] = base_score + bonus
 
         # מיון לפי הציון החדש
         matches.sort(key=lambda x: x['_score'], reverse=True)
-        top_matches = matches[:285]
+        
+        # לוקחים את ה-20 הכי טובים לג'מיני (במקום מאות) כדי שיתמקד בעיקר
+        top_matches = matches[:20]
 
         contexts = []
         for m in top_matches:
             txt = m['metadata']['text']
             src = m['id']
-            # מציג בלוג איזה מילים נמצאו כדי שתראה שהתיקון עובד
+            # הדפסה ללוג לצורך בדיקה
             found_terms = [w for w in search_words if w in normalize_text_for_search(txt)]
-            logging.info(f"✅ CHOSEN: {src} (Score: {m['_score']:.2f}) Matches: {found_terms}")
+            logging.info(f"✅ CANDIDATE: {src} (Final Score: {m['_score']:.3f}) Found: {found_terms}")
             contexts.append(f"--- מקור: {src} ---\n{txt}")
             
         context_block = "\n\n".join(contexts)
