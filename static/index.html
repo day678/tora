@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>חברותא - לימוד וחיפוש</title>
+    <style>
+        body { font-family: sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background-color: #f5f5f5; }
+        .chat-container { background: white; border-radius: 10px; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); min-height: 400px; display: flex; flex-direction: column; }
+        #chat-history { flex-grow: 1; overflow-y: auto; margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 10px; height: 50vh; }
+        .message { margin: 10px 0; padding: 10px; border-radius: 8px; max-width: 80% }
+        .user-msg { background-color: #e3f2fd; margin-right: auto; text-align: right; }
+        .bot-msg { background-color: #f1f1f1; margin-left: auto; text-align: right; }
+        .input-area { display: flex; gap: 10px; }
+        input { flex-grow: 1; padding: 10px; border: 1px solid #ccc; border-radius: 5px; font-size: 16px; }
+        button { padding: 10px 20px; background-color: #2196F3; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }
+        button:hover { background-color: #1976D2; }
+        button:disabled { background-color: #ccc; }
+    </style>
+</head>
+<body>
+    <h1 style="text-align: center;">חברותא תורנית</h1>
+    <div class="chat-container">
+        <div id="chat-history"></div>
+        <div class="input-area">
+            <input type="text" id="user-input" placeholder="שאל שאלה בלימוד..." onkeypress="if(event.key==='Enter') sendMessage()">
+            <button onclick="sendMessage()" id="send-btn">שלח</button>
+        </div>
+    </div>
+
+    <script>
+        // יצירת מזהה משתמש אקראי לשמירת הקשר השיחה
+        const userId = localStorage.getItem('chat_user_id') || Math.random().toString(36).substr(2, 9);
+        localStorage.setItem('chat_user_id', userId);
+
+        async function sendMessage() {
+            const input = document.getElementById('user-input');
+            const btn = document.getElementById('send-btn');
+            const text = input.value.trim();
+            if (!text) return;
+
+            // הצגת הודעת המשתמש
+            addMessage(text, 'user-msg');
+            input.value = '';
+            input.disabled = true;
+            btn.disabled = true;
+            btn.innerText = 'חושב...';
+
+            try {
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: text, user_id: userId })
+                });
+                const data = await response.json();
+                addMessage(data.response || "שגיאה בקבלת תשובה", 'bot-msg');
+            } catch (error) {
+                console.error(error);
+                addMessage("שגיאה בתקשורת עם השרת.", 'bot-msg');
+            }
+
+            input.disabled = false;
+            btn.disabled = false;
+            btn.innerText = 'שלח';
+            input.focus();
+        }
+
+        function addMessage(text, className) {
+            const history = document.getElementById('chat-history');
+            const div = document.createElement('div');
+            div.className = `message ${className}`;
+            div.innerText = text;
+            history.appendChild(div);
+            history.scrollTop = history.scrollHeight;
+        }
+    </script>
+</body>
+</html>
