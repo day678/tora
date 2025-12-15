@@ -345,7 +345,7 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
 
         # מיון לפי הציון החדש
         matches.sort(key=lambda x: x['_score'], reverse=True)
-        top_matches = matches[:5]
+        top_matches = matches[:15]
 
         contexts = []
         for m in top_matches:
