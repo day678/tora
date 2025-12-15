@@ -259,6 +259,36 @@ def analyze_audio_for_rag(audio_path):
         logging.error(f"Error analysis: {e}")
     return None
 
+# --- 🚀 פונקציה לניתוח טקסט (עבור האתר) ---
+def analyze_text_for_rag(text_input):
+    if not GEMINI_API_KEY: return None
+    try:
+        prompt = f"""
+        אתה מומחה לתלמוד. קרא את השאלה הבאה: "{text_input}"
+        עליך להבין את כוונת המשתמש ולהפיק נתונים לחיפוש חכם במאגר.
+        
+        החזר JSON בלבד עם השדות:
+        1. "talmudic_search_query": מילות מפתח ארמיות/תלמודיות מתוך השאלה.
+        2. "modern_topic_search": תיאור הנושא בעברית מודרנית ברורה.
+        3. "masechet": שם המסכת בעברית אם הוזכרה.
+        4. "specific_daf": אם הוזכר דף ספציפי, המר לאנגלית (למשל: "Daf 2a").
+        """
+        
+        API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+        resp = requests.post(f"{API_URL}?key={GEMINI_API_KEY}", json={
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"response_mime_type": "application/json"}
+        }, timeout=30)
+        
+        if resp.status_code == 200:
+            res_json = json.loads(resp.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "{}"))
+            if isinstance(res_json, list): res_json = res_json[0]
+            return res_json
+    except Exception as e:
+        logging.error(f"Error text analysis: {e}")
+    # במקרה של שגיאה נחזיר אובייקט ריק כדי שהתהליך ימשיך
+    return {"talmudic_search_query": text_input, "modern_topic_search": text_input}
+
 # --- 🚀 RAG חכם עם סינון מדויק ודירוג גמיש (Fuzzy) ---
 def generate_rag_response(transcript: str, analysis_data: dict, phone_number: str, instruction_file: str, remember_history: bool) -> str:
     if not transcript: return "לא שמעתי."
@@ -345,7 +375,7 @@ def generate_rag_response(transcript: str, analysis_data: dict, phone_number: st
 
         # מיון לפי הציון החדש
         matches.sort(key=lambda x: x['_score'], reverse=True)
-        top_matches = matches[:1285]
+        top_matches = matches[:285]
 
         contexts = []
         for m in top_matches:
@@ -505,6 +535,35 @@ def process_transcript_route(history, instr):
 @app.route("/upload_audio_to_email", methods=["GET"])
 def upload_audio_to_email():
     return Response("id_list_message=t-נשלח למייל&go_to_folder=/", mimetype="text/plain")
+
+# --- Routes for Web Chat ---
+
+@app.route("/api/chat", methods=["POST"])
+def web_chat():
+    data = request.json
+    user_message = data.get("message")
+    user_id = data.get("user_id", "web_guest") 
+    
+    if not user_message:
+        return jsonify({"error": "No message provided"}), 400
+
+    # 1. ניתוח הטקסט 
+    analysis = analyze_text_for_rag(user_message)
+    
+    # 2. שימוש במנוע ה-RAG הקיים
+    answer = generate_rag_response(
+        transcript=user_message,
+        analysis_data=analysis,
+        phone_number=f"web_{user_id}",
+        instruction_file=INSTRUCTIONS_TRANSCRIPT_NEW_FILE,
+        remember_history=True
+    )
+    
+    return jsonify({"response": answer})
+
+@app.route("/chat", methods=["GET"])
+def chat_page():
+    return app.send_static_file('index.html')
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
